@@ -53,5 +53,11 @@ export const LIVE2D_CONFIG = {
         headAngleRange: 30,    // 头部旋转最大角度
         bodyAngleRange: 10,    // 身体旋转最大角度
         bodyFactor: 0.4,       // 身体跟随程度（相对头部）
+    },
+    // 触摸交互配置 —— 模拟头部与身体的点击响应（基于屏幕相对坐标）
+    touchInteraction: {
+        enabled: true,
+        headRatio: 0.33,       // 上半部分 33% 区域视为头部
+        cooldownMs: 3000       // 防触发冷却时间（毫秒），避免频繁摸头触发大量回复
     }
 };

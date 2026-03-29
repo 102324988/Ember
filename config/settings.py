@@ -70,14 +70,19 @@ class Settings:
     SYSTEM_PROMPT = CORE_PERSONA + PROMPTS.get("system_prompt", "")
     STATE_UPDATE_PROMPT = PROMPTS.get("state_update_prompt", "")
     GRAPH_CONSOLIDATION_PROMPT = PROMPTS.get("graph_consolidation_prompt", "")
+    TOOL_USAGE_GUIDELINES = PROMPTS.get("tool_usage_guidelines", "")
 
-    STATE_IDLE_MAX_TIMEOUT = int(os.getenv("STATE_IDLE_MAX_TIMEOUT", "3600"))
-    STATE_IDLE_MIN_TIMEOUT = int(os.getenv("STATE_IDLE_MIN_TIMEOUT", "30"))
+    TIME_ACCEL_FACTOR = float(os.getenv("TIME_ACCEL_FACTOR", "1.0"))
+
+    # 空闲超时时间：配置值为真实世界秒数，内部乘以加速因子转换为系统时间
+    STATE_IDLE_MIN_TIMEOUT = int(os.getenv("STATE_IDLE_MIN_TIMEOUT", "30")) * int(TIME_ACCEL_FACTOR)
+    STATE_IDLE_MAX_TIMEOUT = int(os.getenv("STATE_IDLE_MAX_TIMEOUT", "3600")) * int(TIME_ACCEL_FACTOR)
 
     IDLE_STATE_UPDATE_PROMPT = PROMPTS.get("idle_state_update_prompt", "")
     IDLE_SPEAKING_UPDATE_PROMPT = PROMPTS.get("idle_speaking_update_prompt", "")
-
-    TIME_ACCEL_FACTOR = float(os.getenv("TIME_ACCEL_FACTOR", "1.0"))
+    STATE_UPDATE_INTERVAL = int(
+        os.getenv("STATE_UPDATE_INTERVAL", "1")
+    )  # 每几轮对话更新一次状态
     START_TIME = os.getenv(
         "START_TIME",
         time.time(),
@@ -105,6 +110,21 @@ class Settings:
     MEMORY_ENCODING_PROMPT = PROMPTS.get("memory_encoding_prompt", "")
     MEMORY_DECENT_FACTOR = float(os.getenv("MEMORY_DECENT_FACTOR", "0.5"))
     RECALL_TOP_K = int(os.getenv("RECALL_TOP_K", "10"))
+
+    # LLM generation temperature; overridable via env for benchmark/determinism
+    LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.7"))
+
+    # Tool system configuration
+    ENABLE_TOOLS = os.getenv("ENABLE_TOOLS", "True").lower() == "true"
+    TOOL_MAX_CALLS_PER_TURN = int(os.getenv("TOOL_MAX_CALLS_PER_TURN", "3"))
+    TOOL_EXECUTOR_PERMISSION = os.getenv("TOOL_EXECUTOR_PERMISSION", "READWRITE")
+    TOOL_DEFAULT_TIMEOUT = float(os.getenv("TOOL_DEFAULT_TIMEOUT", "30.0"))
+    TOOL_FILE_SANDBOX_DIR = os.getenv("TOOL_FILE_SANDBOX_DIR", "./data/files")
+    TOOL_NOTES_DIR = os.getenv("TOOL_NOTES_DIR", "./data/notes")
+
+    # Tool-specific API keys (optional)
+    WEATHER_API_KEY = os.getenv("WEATHER_API_KEY", "")
+    SEARCH_API_KEY = os.getenv("SEARCH_API_KEY", "")
 
 
 settings = Settings()

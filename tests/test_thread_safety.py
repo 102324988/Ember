@@ -1,6 +1,7 @@
 """
 线程安全测试 - 验证修复后的问题
 """
+
 import pytest
 import threading
 import time
@@ -24,7 +25,7 @@ class TestShortTermMemoryThreads:
         time.sleep(0.5)
 
         # 验证线程池存在
-        assert hasattr(ShortTermMemory, '_executor')
+        assert hasattr(ShortTermMemory, "_executor")
         assert ShortTermMemory._executor is not None
 
     def test_concurrent_add_message(self):
@@ -60,14 +61,15 @@ class TestBrainConcurrency:
         """测试 _is_processing 标志防止并发处理"""
         from unittest.mock import Mock, patch
 
-        with patch('brain.core.LLMClient') as mock_llm, \
-             patch('brain.core.Hippocampus') as mock_hippo:
+        with patch("brain.core.LLMClient") as mock_llm, patch(
+            "brain.core.Hippocampus"
+        ) as mock_hippo:
 
             from brain.core import Brain
             from core.event_bus import EventBus
 
             mock_llm.return_value.stream_chat.return_value = iter(["测试回复"])
-            mock_hippo.return_value.road_memory.return_value = []
+            mock_hippo.return_value.load_memory.return_value = []
 
             event_bus = EventBus()
             mock_state = Mock()
@@ -101,8 +103,9 @@ class TestBrainErrorHandling:
 
         event_bus = EventBus()
 
-        with patch('brain.core.LLMClient') as mock_llm, \
-             patch('brain.core.Hippocampus') as mock_hippo:
+        with patch("brain.core.LLMClient") as mock_llm, patch(
+            "brain.core.Hippocampus"
+        ) as mock_hippo:
 
             # 模拟 LLM 抛出异常
             mock_llm_instance = MagicMock()
@@ -110,7 +113,7 @@ class TestBrainErrorHandling:
             mock_llm.return_value = mock_llm_instance
 
             mock_hippo_instance = MagicMock()
-            mock_hippo_instance.road_memory.return_value = []
+            mock_hippo_instance.load_memory.return_value = []
             mock_hippo.return_value = mock_hippo_instance
 
             mock_state = Mock()
@@ -140,7 +143,7 @@ class TestBrainErrorHandling:
 
         event_bus = EventBus()
 
-        with patch('brain.core.LLMClient') as mock_llm:
+        with patch("brain.core.LLMClient") as mock_llm:
             # 模拟 LLM 流式调用时抛出异常
             mock_llm_instance = MagicMock()
             mock_llm_instance.stream_chat.side_effect = Exception("API 错误")
@@ -148,7 +151,7 @@ class TestBrainErrorHandling:
 
             # hippocampus 正常返回
             mock_hippo_instance = MagicMock()
-            mock_hippo_instance.road_memory.return_value = []
+            mock_hippo_instance.load_memory.return_value = []
 
             mock_state = Mock()
             mock_state.prompt_injection = ""
@@ -180,5 +183,5 @@ class TestStateManagerThreads:
         """测试异步日志使用线程池"""
         from persona.state_manager import StateManager
 
-        assert hasattr(StateManager, '_executor')
+        assert hasattr(StateManager, "_executor")
         assert StateManager._executor is not None

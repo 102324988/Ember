@@ -16,6 +16,7 @@ from memory.db_memory import DBMemory
 
 from memory.episodic_memory import EpisodicMemory
 from memory.memory_process import Hippocampus
+from tools.processor import ToolCallProcessor
 
 
 input_queue = queue.Queue()
@@ -42,8 +43,12 @@ def main():
 
     episodic_memory = EpisodicMemory(event_bus)
     hippocampus = Hippocampus(event_bus)
-    state_manager = StateManager(event_bus, hippocampus, memory)
-    brain = Brain(event_bus, state_manager, memory, hippocampus)
+
+    # 创建并复用 ToolCallProcessor
+    tool_processor = ToolCallProcessor.create_with_memory_tool(hippocampus)
+
+    state_manager = StateManager(event_bus, hippocampus, memory, tool_processor)
+    brain = Brain(event_bus, state_manager, memory, hippocampus, tool_processor)
     db_memory = DBMemory(event_bus)
 
     heartbeat.start()
