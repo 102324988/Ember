@@ -2,8 +2,10 @@ import json
 import threading
 import os
 import re
+import copy
 from concurrent.futures import ThreadPoolExecutor
 from brain.tag_utils import extract_thought_and_speech
+from config.settings import settings
 
 
 def separate_thought_and_speech(text):
@@ -70,9 +72,19 @@ class ShortTermMemory:
         self._executor.submit(_log)
 
     def add_message(self, role, content):
-        # content = separate_thought_and_speech(content)[1]
-        self.async_log("./config/chat_history.log", f"{role}: {content}")
-        self._add_back(role, content)
+        if role == "assistant":
+            _, speech = separate_thought_and_speech(content)
+            self._add_back(role, speech)
+            self.async_log(
+                "./config/chat_history.log",
+                f"{role}: {speech}",
+            )
+        else:
+            self._add_back(role, content)
+            self.async_log(
+                "./config/chat_history.log",
+                f"{role}: {content}",
+            )
         self._save_memory()
 
     def _save_memory(self):
@@ -95,10 +107,15 @@ class ShortTermMemory:
         ] + self.memory
 
     def get_memory(self):
-        """返回内存的副本，防止外部修改"""
-        import copy
         return {"history": copy.deepcopy(self.memory)}
 
     def clear_memory(self):
         self.memory = []
         self._async_log_clear("./config/chat_history.log")
+
+    def get_last_n_messages(self, n):
+        if n <= 0:
+            return []
+        if n >= len(self.memory):
+            return copy.deepcopy(self.memory)
+        return copy.deepcopy(self.memory[-n:])

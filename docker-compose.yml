@@ -1,7 +1,7 @@
 services:
   postgres:
     image: pgvector/pgvector:pg16
-    container_name: ember-postgres
+    container_name: ember2-postgres
     ports:
       - "5432:5432"
     environment:
@@ -16,7 +16,7 @@ services:
 
   neo4j:
     image: neo4j:latest
-    container_name: ember-neo4j
+    container_name: ember2-neo4j
     ports:
       - "7474:7474"
       - "7687:7687"

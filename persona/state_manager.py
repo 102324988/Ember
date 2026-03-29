@@ -9,6 +9,7 @@ from memory.short_term import ShortTermMemory
 import random
 from concurrent.futures import ThreadPoolExecutor
 import threading
+from tools.processor import ToolCallProcessor
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +23,7 @@ class StateManager:
         event_bus: EventBus,
         hippocampus: Hippocampus,
         short_term_memory: ShortTermMemory,
+        tool_processor: ToolCallProcessor = None,
     ):
         self.event_bus = event_bus
         self.hippocampus = hippocampus
@@ -35,6 +37,12 @@ class StateManager:
         self._thinking_lock = threading.Lock()  # 保护 is_thinking
         self._thinking = False
         self.is_sleeping = False
+        self.dialogue_count = 0
+
+        # 工具调用处理器（外部传入或自动创建）
+        self.tool_processor = (
+            tool_processor or ToolCallProcessor.create_with_memory_tool(hippocampus)
+        )
 
         self.event_bus.subscribe("user_interaction", self._on_llm_state_update)
         self.event_bus.subscribe("system.tick", self._on_tick)
@@ -94,15 +102,121 @@ class StateManager:
             .replace("{{old_state}}", info["old_state"])
         )
 
-    def _ask_llm(self, system_prompt, user_prompt):
+    def _ask_llm(self, system_prompt, user_prompt, call_type: str = "state_update"):
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ]
         return self.llm_client.one_chat(
-            model_config=settings.LARGE_LLM,
+            model_config=settings.SMALL_LLM,
             messages=messages,
+            call_type=call_type,
         )
+
+    def _ask_llm_with_tools(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        call_type: str = "state_update",
+        max_iterations: int = 1,
+    ) -> str:
+        """
+        支持工具调用的 LLM 请求
+
+        Args:
+            system_prompt: 系统提示词
+            user_prompt: 用户提示词
+            call_type: 调用类型
+            max_iterations: 最大迭代次数（防止无限循环）
+
+        Returns:
+            LLM 的最终输出（已处理工具调用）
+        """
+        # 构建带工具说明的系统提示
+        enhanced_prompt = self.tool_processor.build_system_prompt_with_tools(
+            system_prompt
+        )
+
+        messages = [
+            {"role": "system", "content": enhanced_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
+
+        iteration = 0
+        final_response = ""
+
+        while iteration < max_iterations:
+            iteration += 1
+            response = self.llm_client.one_chat(
+                model_config=settings.SMALL_LLM,
+                messages=messages,
+                call_type=call_type,
+            )
+
+            if not response:
+                break
+
+            # 处理工具调用（带调用来源标识）
+            caller = f"StateManager._ask_llm_with_tools[{call_type}]"
+            result = self.tool_processor.process_llm_output(
+                response, execute=True, caller=caller
+            )
+
+            if not result["has_tool_calls"]:
+                # 没有工具调用，直接返回
+                final_response = response
+                break
+
+            # 有工具调用，将结果反馈给 LLM
+            logger.info(f"[StateManager] 检测到 {len(result['tool_calls'])} 个工具调用")
+
+            # 构建后续消息
+            messages.append({"role": "assistant", "content": response})
+            messages.append(
+                {
+                    "role": "user",
+                    "content": f"{result['results_text']}\n请根据工具执行结果继续处理。",
+                }
+            )
+
+            # 保存最终清理后的文本
+            final_response = result["clean_text"]
+
+        # 检查最终输出是否仍包含工具标签，如果是则重试
+        retry_count = 0
+        max_retry = 2
+        while (
+            self.tool_processor.has_tool_calls(final_response)
+            and retry_count < max_retry
+        ):
+            retry_count += 1
+            logger.warning(
+                f"[StateManager] 最终输出仍包含工具调用标签，请求 LLM 重新生成 (第 {retry_count} 次)"
+            )
+
+            retry_messages = messages + [
+                {"role": "assistant", "content": final_response},
+                {
+                    "role": "user",
+                    "content": "你的回复中包含了工具调用标签，这是不允许的。请直接给出你的回复，不要使用任何工具调用。",
+                },
+            ]
+
+            retry_response = self.llm_client.one_chat(
+                model_config=settings.SMALL_LLM,
+                messages=retry_messages,
+                call_type=call_type,
+            )
+
+            if retry_response:
+                final_response = retry_response
+
+        # 最终仍有工具标签，强制清理
+        if self.tool_processor.has_tool_calls(final_response):
+            logger.warning("[StateManager] 重试后仍有工具标签，强制清理")
+            final_response = self.tool_processor.remove_tool_calls(final_response)
+
+        return final_response
 
     def _async_log(self, filename, content):
         def _log():
@@ -119,13 +233,13 @@ class StateManager:
         del data["近期综合轨迹"]
         self._async_log(
             "./config/chat_history.log",
-            f"{{状态更新: {json.dumps(data, ensure_ascii=False)}}}",
+            f"{self.state_zip}",
         )
 
         self.event_bus.publish(Event("state.update", data={"new_state": new_state}))
 
         # 使用锁保护文件写入，防止竞争条件
-        if not hasattr(self, '_state_lock'):
+        if not hasattr(self, "_state_lock"):
             self._state_lock = threading.Lock()
 
         with self._state_lock:
@@ -151,7 +265,12 @@ class StateManager:
     def _on_llm_state_update(self, event: Event):
         if self.is_thinking:
             return
-
+        self.dialogue_count += 1
+        if self.dialogue_count % settings.STATE_UPDATE_INTERVAL != 0:
+            logger.info(
+                f"对话轮次 {self.dialogue_count}，跳过状态更新（间隔={settings.STATE_UPDATE_INTERVAL}）"
+            )
+            return
         self.state_update_timeout = settings.STATE_IDLE_MIN_TIMEOUT
         self.is_thinking = True
         history = event.data.get("history", [])
@@ -162,7 +281,10 @@ class StateManager:
         prompt = f"当前的准确时间: {logical_now_str}\n\n[先前状态]\n{json.dumps(self.current_state, ensure_ascii=False)}\n\n[近期对话记录]:\n{json.dumps(history, ensure_ascii=False)}\n\n{settings.STATE_UPDATE_PROMPT}"
 
         try:
-            response = self._ask_llm(settings.CORE_PERSONA, prompt)
+            # 使用支持工具调用的 LLM 请求
+            response = self._ask_llm_with_tools(
+                settings.CORE_PERSONA, prompt, call_type="state_update"
+            )
             if response:
 
                 new_state = self.llm_client._extract_json(response)
@@ -172,16 +294,18 @@ class StateManager:
                 new_state["对应时间"] = logical_now_str
                 self._update_state(new_state, logical_now=logical_now)
 
-                logger.info(f"[{logical_now_str}] 对话引发状态更新: {new_state}")
+                # 使用压缩格式记录日志
+                logger.info(f"[{logical_now_str}] 对话引发状态更新:{self.state_zip}")
 
         except Exception as e:
             logger.error(f"对话更新失败: {e}")
         finally:
             self.is_thinking = False
-            self.last_interaction_logical_time = logical_now
+            self.last_interaction_logical_time = self._get_logical_now()
 
     def _update_state_due_to_idle(self, logical_now):
         self.is_thinking = True
+        self.dialogue_count = 0  # 重置对话计数器
         logical_now_str = self._format_logical_time(logical_now)
         logger.info(f"[{logical_now_str}] 收到闲置事件，准备更新状态...")
 
@@ -189,20 +313,22 @@ class StateManager:
 
         history = self.short_term_memory.get_memory().get("history", [])
 
-        context_for_memory = f"时间: {logical_now_str}\n对话历史: {json.dumps(history, ensure_ascii=False)}\n先前状态: {json.dumps(self.current_state, ensure_ascii=False)}"
+        # 不再直接调用 hippocampus.load_memory，改为让 LLM 通过工具主动获取记忆
+        # 这样与对话系统的记忆加载方式保持一致
 
-        memories = self.hippocampus.road_memory(context_for_memory)
+        user_content = f"""【环境变更推断任务】
+距离上次互动已经过去 {info['idle_duration']} 分钟，当前时间为 {info['current_time']}。
+历史状态：{info['old_state']}
+[近期对话记录]:\n{json.dumps(history, ensure_ascii=False)}
+"""
 
-        prompt = self._apply_idle_template(settings.IDLE_STATE_UPDATE_PROMPT, info)
-
-        if memories:
-            prompt = (
-                f"[脑海闪现的记忆]:\n{memories}\n\n[近期对话记录]:\n{json.dumps(history, ensure_ascii=False)}\n\n"
-                + prompt
-            )
+        prompt = user_content + "\n\n" + settings.IDLE_STATE_UPDATE_PROMPT
 
         try:
-            response = self._ask_llm(settings.CORE_PERSONA, prompt)
+            # 使用支持工具调用的 LLM 请求
+            response = self._ask_llm_with_tools(
+                settings.CORE_PERSONA, prompt, call_type="idle_evolve"
+            )
             if response:
                 data = self.llm_client._extract_json(response)
                 if data is None:
@@ -244,24 +370,46 @@ class StateManager:
                         )
                     )
 
-                logger.info(f"[{logical_now_str}] 闲置逻辑演化: {data}")
+                # 使用压缩格式记录日志
+                logger.info(f"[{logical_now_str}] 闲置逻辑演化:{self.state_zip}")
 
         except Exception as e:
             logger.error(f"闲置更新失败: {e}")
         finally:
             self.is_thinking = False
-            self.last_interaction_logical_time = logical_now
+            self.last_interaction_logical_time = self._get_logical_now()
 
     @property
     def prompt_injection(self):
-        state_text = json.dumps(self.current_state, ensure_ascii=False, indent=2)
-        return f"\n\n###依鸣的前一时刻状态###\n{state_text}\n\n"
+        return f"\n\n【角色的先前状态】\n{self.state_zip_full}\n\n"
+
+    @property
+    def state_zip_full(self):
+        s = self.current_state
+        line = s.get("近期综合轨迹", "")
+        return f"{self.state_zip}\n近期综合轨迹:{line}\n"
+
+    @property
+    def state_zip(self):
+        """压缩状态注入：完整保留字段，用紧凑格式节省 token"""
+        s = self.current_state
+        time_str = s.get("对应时间", "")
+        pad = f"P:{s.get('P',5)} A:{s.get('A',5)} D:{s.get('D',5)}"
+        situation = s.get("客观情境", "")
+        inner = s.get("内心活动", "")
+        goal = s.get("近期目标", "")
+
+        # 紧凑格式，完整保留内容
+        return f"\n[状态 {time_str} | {pad}]\n情境:{situation}\n内心:{inner}\n目标:{goal}\n"
 
     @property
     def speaking_prompt_injection(self):
         logical_now = self._get_logical_now()
         info = self._get_idle_info(logical_now)
-        prompt = self._apply_idle_template(settings.IDLE_SPEAKING_UPDATE_PROMPT, info)
+        # 将动态内容构建到用户消息中，保持 system prompt 静态
+        prompt = f"""距离上次互动已过去 {info['idle_duration']} 分钟，当前 {info['current_time']}。原状态为 {info['old_state']}。
+{settings.IDLE_SPEAKING_UPDATE_PROMPT}
+接下来提供之前的聊天记录供参考。"""
         return f"\n\n###你的任务###\n{prompt}\n\n"
 
     @property

@@ -51,6 +51,25 @@ class EventBus:
     def format_logical_time(self, logical_time, fmt="%Y-%m-%d %H:%M:%S"):
         return time.strftime(fmt, time.localtime(logical_time))
 
+    def set_time_accel_factor(self, factor: float):
+        """动态设置时间加速因子，同时修正基准时间以保持逻辑时间连续"""
+        if factor <= 0:
+            logger.warning(f"无效的时间加速因子: {factor}，必须大于0")
+            return False
+
+        # 先计算当前逻辑时间
+        current_logical = self.logical_now
+
+        # 更新加速因子
+        self.time_accel_factor = factor
+
+        # 重置基准，保持逻辑时间连续
+        self._base_logical_time = current_logical
+        self._real_start_time = time.time()
+
+        logger.info(f"时间加速因子已更新为: {factor}")
+        return True
+
     def subscribe(self, event_name: str, callback: Callable):
         self._subscribers[event_name].append(callback)
 

@@ -34,6 +34,8 @@ data/cache/
 data/db/
 data/state/
 data/vector_store/
+data/archives/*
+!data/archives/default.ember
 
 *.db
 *.sqlite3
@@ -45,6 +47,9 @@ chroma_db/
 config/chat_history.log
 config/chat_memory.json
 config/state.json
+config/state.json.bak
+config/chat_history.json.bak
+config/chat_memory.json.bak
 
 # =========================
 # IDE & 操作系统配置

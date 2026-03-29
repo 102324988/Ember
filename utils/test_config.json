@@ -1,0 +1,27 @@
+{
+  "_comment": "Ember Benchmark Runner 配置文件",
+  "timeout_per_turn": 120,
+
+  "latency": {
+    "enabled": true,
+    "_comment": "记录每轮 TTFT（首 Token 延迟）和总耗时"
+  },
+
+  "stress": {
+    "enabled": false,
+    "turns": 30,
+    "_comment": "极端压力测试：运行 N 轮（循环脚本）寻找 Token 增长天花板"
+  },
+
+  "memory_roi": {
+    "enabled": true,
+    "_comment": "评估记忆关键词是否出现在回复中"
+  },
+
+  "baseline": {
+    "_comment": "上次手动测试数据（2026-03-15），用于对比当前优化效果",
+    "manual_test_date": "2026-03-15",
+    "a_total_tokens": 4680,
+    "b_total_tokens": 7747
+  }
+}

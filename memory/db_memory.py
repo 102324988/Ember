@@ -197,7 +197,7 @@ class DBMemory:
 
     def _on_state_update(self, event: Event):
         data = {
-            "text": json.dumps(event.data["new_state"]),
+            "text": json.dumps(event.data["new_state"], ensure_ascii=False),
             "timestamp": self.event_bus.formatted_logical_now,
         }
         content = {"data": data, "database": "state_list"}

@@ -233,15 +233,20 @@ class EntityExtractionMemory:
         graph_prompt = settings.GRAPH_CONSOLIDATION_PROMPT
 
         # 替换变量
-        formatted_graph_prompt = graph_prompt.replace("{{summaries}}", summaries)
 
         messages = [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": formatted_graph_prompt},
+            {"role": "system", "content": graph_prompt},
+            {
+                "role": "user",
+                "content": f"请处理以下摘要，并按上述格式输出：\n\n{summaries}",
+            },
         ]
 
         try:
-            response = self.llm_client.one_chat(settings.LARGE_LLM, messages)
+            response = self.llm_client.one_chat(
+                settings.LARGE_LLM, messages, timeout=180
+            )
             if response is None:
                 logger.error("LLM 返回空响应")
                 return []

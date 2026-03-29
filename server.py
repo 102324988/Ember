@@ -3,9 +3,11 @@ import asyncio
 import time
 import logging
 import os
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
+from typing import Optional
 from core.event_bus import EventBus, Event
 from core.heartbeat import Heartbeat
 from persona.state_manager import StateManager
@@ -18,6 +20,8 @@ from memory.memory_process import Hippocampus
 from memory.db_memory import DBMemory
 from memory.entity_extraction import EntityExtractionMemory
 from config.logging_config import get_logger
+from tools.processor import ToolCallProcessor
+from archive import ArchiveManager
 
 # Configure logging
 logger = get_logger(__name__)
@@ -74,12 +78,35 @@ class EmberServer:
         self.episodic_memory = EpisodicMemory(self.event_bus)
         self.hippocampus = Hippocampus(self.event_bus)
         self.db_memory = DBMemory(self.event_bus)
-        self.state_manager = StateManager(self.event_bus, self.hippocampus, self.memory)
+
+        # 创建并复用 ToolCallProcessor
+        self.tool_processor = ToolCallProcessor.create_with_memory_tool(
+            self.hippocampus
+        )
+
+        self.state_manager = StateManager(
+            self.event_bus, self.hippocampus, self.memory, self.tool_processor
+        )
         self.entity_memory = EntityExtractionMemory(self.event_bus)
         self.brain = Brain(
-            self.event_bus, self.state_manager, self.memory, self.hippocampus
+            self.event_bus,
+            self.state_manager,
+            self.memory,
+            self.hippocampus,
+            self.tool_processor,
         )
         self.tts_manager = TTSManager(voice="zh-CN-XiaoxiaoNeural")
+
+        # Initialize archive manager
+        self.archive_manager = ArchiveManager(
+            event_bus=self.event_bus,
+            hippocampus=self.hippocampus,
+            heartbeat=self.heartbeat,
+            state_manager=self.state_manager,
+            short_term_memory=self.memory,
+            episodic_memory=self.episodic_memory,
+            db_memory=self.db_memory,
+        )
 
         self._setup_middleware()
         self._setup_routes()
@@ -112,7 +139,28 @@ class EmberServer:
                 "display_name": settings.CHARACTER_NAME,
                 "state": self.state_manager.current_state,
                 "logical_time": self.event_bus.formatted_logical_now,
+                "is_thinking": self.state_manager.is_thinking,
+                "time_accel_factor": self.event_bus.time_accel_factor,
             }
+
+        class TimeAccelRequest(BaseModel):
+            factor: float
+
+        @self.app.post("/config/time_accel")
+        async def set_time_accel(request: TimeAccelRequest):
+            """动态设置时间加速因子"""
+            if request.factor <= 0:
+                raise HTTPException(status_code=400, detail="时间加速因子必须大于0")
+
+            success = self.event_bus.set_time_accel_factor(request.factor)
+            if success:
+                return {
+                    "success": True,
+                    "time_accel_factor": self.event_bus.time_accel_factor,
+                    "logical_time": self.event_bus.formatted_logical_now,
+                }
+            else:
+                raise HTTPException(status_code=500, detail="设置时间加速因子失败")
 
         @self.app.get("/history")
         async def get_history(limit: int = 20, before: int = None):
@@ -121,6 +169,108 @@ class EmberServer:
             except Exception as e:
                 logger.error(f"Failed to fetch history: {e}")
                 return []
+
+        # ==================== 存档 API ====================
+
+        class ArchiveCreateRequest(BaseModel):
+            slot_name: str
+            description: Optional[str] = ""
+
+        class ArchiveLoadRequest(BaseModel):
+            slot_name: str
+
+        @self.app.get("/api/archive/list")
+        async def list_archives():
+            """获取存档列表"""
+            try:
+                slots = self.archive_manager.list_archives()
+                return {
+                    "success": True,
+                    "archives": [slot.to_dict() for slot in slots],
+                }
+            except Exception as e:
+                logger.error(f"获取存档列表失败: {e}")
+                raise HTTPException(status_code=500, detail=str(e))
+
+        @self.app.post("/api/archive/create")
+        async def create_archive(request: ArchiveCreateRequest):
+            """创建存档"""
+            try:
+                result = await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    self.archive_manager.create_archive,
+                    request.slot_name,
+                    request.description or "",
+                )
+                return result.to_dict()
+            except Exception as e:
+                logger.error(f"创建存档失败: {e}")
+                raise HTTPException(status_code=500, detail=str(e))
+
+        @self.app.post("/api/archive/load")
+        async def load_archive(request: ArchiveLoadRequest):
+            """加载存档"""
+            try:
+                result = await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    self.archive_manager.load_archive,
+                    request.slot_name,
+                )
+                return result.to_dict()
+            except Exception as e:
+                logger.error(f"加载存档失败: {e}")
+                raise HTTPException(status_code=500, detail=str(e))
+
+        @self.app.delete("/api/archive/{slot_name}")
+        async def delete_archive(slot_name: str):
+            """删除存档"""
+            try:
+                result = self.archive_manager.delete_archive(slot_name)
+                return result.to_dict()
+            except Exception as e:
+                logger.error(f"删除存档失败: {e}")
+                raise HTTPException(status_code=500, detail=str(e))
+
+        @self.app.get("/api/archive/{slot_name}/preview")
+        async def preview_archive(slot_name: str):
+            """预览存档信息"""
+            try:
+                manifest = self.archive_manager.get_archive_preview(slot_name)
+                if manifest:
+                    return {"success": True, "manifest": manifest.to_dict()}
+                else:
+                    raise HTTPException(status_code=404, detail="存档不存在")
+            except HTTPException:
+                raise
+            except Exception as e:
+                logger.error(f"预览存档失败: {e}")
+                raise HTTPException(status_code=500, detail=str(e))
+
+        @self.app.post("/api/archive/quick-save")
+        async def quick_save():
+            """快速存档"""
+            try:
+                result = await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    self.archive_manager.quick_save,
+                )
+                return result.to_dict()
+            except Exception as e:
+                logger.error(f"快速存档失败: {e}")
+                raise HTTPException(status_code=500, detail=str(e))
+
+        @self.app.post("/api/archive/quick-load")
+        async def quick_load():
+            """快速读档"""
+            try:
+                result = await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    self.archive_manager.quick_load,
+                )
+                return result.to_dict()
+            except Exception as e:
+                logger.error(f"快速读档失败: {e}")
+                raise HTTPException(status_code=500, detail=str(e))
 
         @self.app.websocket("/ws/chat")
         async def websocket_endpoint(websocket: WebSocket):
@@ -141,8 +291,7 @@ class EmberServer:
                     # 使用超时接收，避免阻塞
                     try:
                         data = await asyncio.wait_for(
-                            websocket.receive_text(),
-                            timeout=5.0
+                            websocket.receive_text(), timeout=5.0
                         )
                     except asyncio.TimeoutError:
                         continue  # 超时继续循环，检查心跳
