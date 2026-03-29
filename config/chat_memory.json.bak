@@ -1,0 +1,82 @@
+[
+    {
+        "role": "user",
+        "content": "消息 30-9"
+    },
+    {
+        "role": "user",
+        "content": "消息 40-0"
+    },
+    {
+        "role": "user",
+        "content": "消息 40-1"
+    },
+    {
+        "role": "user",
+        "content": "消息 40-2"
+    },
+    {
+        "role": "user",
+        "content": "消息 40-3"
+    },
+    {
+        "role": "user",
+        "content": "消息 40-4"
+    },
+    {
+        "role": "user",
+        "content": "消息 40-5"
+    },
+    {
+        "role": "user",
+        "content": "消息 40-6"
+    },
+    {
+        "role": "user",
+        "content": "消息 40-7"
+    },
+    {
+        "role": "user",
+        "content": "消息 40-8"
+    },
+    {
+        "role": "user",
+        "content": "消息 40-9"
+    },
+    {
+        "role": "user",
+        "content": "在干嘛"
+    },
+    {
+        "role": "assistant",
+        "content": "刚到宿舍楼下，准备开门回去休息了。今天累坏了。"
+    },
+    {
+        "role": "user",
+        "content": "辛苦啦"
+    },
+    {
+        "role": "assistant",
+        "content": "嗯，终于能躺平了。你也早点休息，晚安。"
+    },
+    {
+        "role": "user",
+        "content": "现在下午1点"
+    },
+    {
+        "role": "assistant",
+        "content": "啊？我看错时间了，刚睡醒脑子还懵着。那我去食堂抢饭了，回聊。"
+    },
+    {
+        "role": "assistant",
+        "content": "不说了，再磨蹭糖醋里脊要被抢光了，回聊！"
+    },
+    {
+        "role": "user",
+        "content": "一起去吃饭吧"
+    },
+    {
+        "role": "assistant",
+        "content": "这次来不及等你啦，我先冲去占位，下次再约！"
+    }
+]
