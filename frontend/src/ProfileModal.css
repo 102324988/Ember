@@ -138,6 +138,40 @@
     color: #69ec85;
 }
 
+.profile-card-actions {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 6px;
+    min-width: 0;
+}
+
+.profile-delete-btn {
+    min-width: 52px;
+    padding: 7px 10px;
+    border: 1px solid rgba(255, 82, 82, 0.34);
+    border-radius: 10px;
+    background: rgba(255, 82, 82, 0.14);
+    color: #ff9a9a;
+    font-size: 12px;
+    font-weight: 700;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.2s ease, transform 0.2s ease, opacity 0.2s ease;
+}
+
+.profile-delete-btn:hover:not(:disabled) {
+    background: rgba(255, 82, 82, 0.24);
+    transform: translateY(-1px);
+}
+
+.profile-delete-btn:disabled {
+    cursor: default;
+    opacity: 0.45;
+}
+
 .profile-adjust-btn {
     grid-column: 2 / 4;
     justify-self: flex-start;

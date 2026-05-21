@@ -9,6 +9,7 @@ import tempfile
 import uuid
 import zipfile
 from pathlib import Path, PurePosixPath
+from urllib.parse import urlparse
 from fastapi import (
     FastAPI,
     WebSocket,
@@ -303,6 +304,35 @@ class EmberServer:
             profile_name = Path(upload.filename or "Imported Live2D").stem.strip()
         return profile_name[:80] or "Imported Live2D"
 
+    def _delete_uploaded_profile_files(self, profile: dict):
+        if profile.get("source") != "upload":
+            return
+
+        profile_id = profile.get("id")
+        if not profile_id:
+            return
+
+        root = Path(USER_LIVE2D_DIR).resolve()
+        target = (root / profile_id).resolve()
+        try:
+            target.relative_to(root)
+        except ValueError:
+            logger.warning(f"Skip unsafe Live2D profile path deletion: {target}")
+            return
+
+        model_path = profile.get("model_path", "")
+        parsed_path = urlparse(model_path).path
+        expected_prefix = f"/user_live2d/{profile_id}/"
+        if parsed_path and not parsed_path.startswith(expected_prefix):
+            logger.warning(f"Skip Live2D file deletion for unexpected model_path: {model_path}")
+            return
+
+        if target.exists():
+            try:
+                shutil.rmtree(target)
+            except OSError as e:
+                logger.warning(f"Failed to delete uploaded Live2D files {target}: {e}")
+
     def _get_current_profile(self) -> dict:
         profiles_config = self._load_profiles_config()
         current_profile_id = profiles_config.get("current_profile_id")
@@ -376,6 +406,9 @@ class EmberServer:
         class ProfileDisplayRequest(BaseModel):
             profile_id: str
             display: dict
+
+        class ProfileDeleteRequest(BaseModel):
+            profile_id: str
 
         @self.app.post("/config/time_accel")
         async def set_time_accel(request: TimeAccelRequest):
@@ -501,6 +534,38 @@ class EmberServer:
             self._save_profiles_config(profiles_config)
 
             return {"success": True, "profile": profile}
+
+        @self.app.post("/api/profiles/delete")
+        async def delete_profile(request: ProfileDeleteRequest):
+            profiles_config = self._load_profiles_config()
+            profiles = profiles_config.get("profiles", [])
+            if len(profiles) <= 1:
+                raise HTTPException(status_code=400, detail="至少需要保留一个 Live2D 模型")
+
+            profile_index = next(
+                (
+                    index
+                    for index, profile in enumerate(profiles)
+                    if profile.get("id") == request.profile_id
+                ),
+                None,
+            )
+            if profile_index is None:
+                raise HTTPException(status_code=404, detail="Profile not found")
+
+            deleted_profile = profiles.pop(profile_index)
+            current_profile_id = profiles_config.get("current_profile_id")
+            if current_profile_id == request.profile_id:
+                profiles_config["current_profile_id"] = profiles[0].get("id", "")
+
+            self._save_profiles_config(profiles_config)
+            self._delete_uploaded_profile_files(deleted_profile)
+
+            return {
+                "success": True,
+                "current_profile_id": profiles_config.get("current_profile_id"),
+                "deleted_profile_id": request.profile_id,
+            }
 
         class ArchiveCreateRequest(BaseModel):
             slot_name: str

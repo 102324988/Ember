@@ -10,6 +10,7 @@ function ProfileModal({ isOpen, onClose, onProfileSelected, onAdjustDisplay }) {
     const [loading, setLoading] = useState(false);
     const [selectingId, setSelectingId] = useState('');
     const [uploading, setUploading] = useState(false);
+    const [deletingId, setDeletingId] = useState('');
     const [error, setError] = useState('');
     const fileInputRef = useRef(null);
 
@@ -101,6 +102,35 @@ function ProfileModal({ isOpen, onClose, onProfileSelected, onAdjustDisplay }) {
         }
     };
 
+    const handleDeleteProfile = async (event, profile) => {
+        event.stopPropagation();
+        if (!profile?.id || deletingId || profiles.length <= 1) return;
+        if (!window.confirm(`删除 Live2D 模型「${profile.name || profile.id}」？`)) return;
+
+        setDeletingId(profile.id);
+        setError('');
+        try {
+            const res = await fetch(`${API_BASE}/delete`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ profile_id: profile.id }),
+            });
+            const data = await res.json().catch(() => ({}));
+
+            if (!res.ok || data.success === false) {
+                throw new Error(data.detail || data.error || '删除 Live2D 模型失败');
+            }
+
+            await loadProfiles();
+            await onProfileSelected?.();
+        } catch (err) {
+            console.error('删除 Live2D 模型失败:', err);
+            setError(err.message || '删除 Live2D 模型失败');
+        } finally {
+            setDeletingId('');
+        }
+    };
+
     if (!isOpen) return null;
 
     const CloseIcon = () => (
@@ -152,12 +182,13 @@ function ProfileModal({ isOpen, onClose, onProfileSelected, onAdjustDisplay }) {
                             {profiles.map(profile => {
                                 const isActive = profile.id === currentProfileId;
                                 const isSelecting = profile.id === selectingId;
+                                const isDeleting = profile.id === deletingId;
                                 return (
                                     <div
                                         role="button"
                                         tabIndex={isActive ? -1 : 0}
                                         key={profile.id}
-                                        className={`profile-card ${isActive ? 'active' : ''} ${selectingId ? 'busy' : ''}`}
+                                        className={`profile-card ${isActive ? 'active' : ''} ${selectingId || deletingId ? 'busy' : ''}`}
                                         onClick={() => handleSelectProfile(profile.id)}
                                         onKeyDown={(e) => {
                                             if (e.key === 'Enter' || e.key === ' ') {
@@ -173,8 +204,21 @@ function ProfileModal({ isOpen, onClose, onProfileSelected, onAdjustDisplay }) {
                                             <span className="profile-name">{profile.name}</span>
                                             <span className="profile-path">{profile.model_path}</span>
                                         </span>
-                                        <span className={`profile-status ${isActive ? 'active' : ''}`}>
-                                            {isActive ? '使用中' : isSelecting ? '切换中...' : '切换'}
+                                        <span className="profile-card-actions">
+                                            <span className={`profile-status ${isActive ? 'active' : ''}`}>
+                                                {isActive ? '使用中' : isSelecting ? '切换中...' : '切换'}
+                                            </span>
+                                            {isActive && (
+                                                <button
+                                                    type="button"
+                                                    className="profile-delete-btn"
+                                                    onClick={(event) => handleDeleteProfile(event, profile)}
+                                                    disabled={profiles.length <= 1 || Boolean(deletingId)}
+                                                    title={profiles.length <= 1 ? '至少需要保留一个 Live2D 模型' : '删除'}
+                                                >
+                                                    {isDeleting ? '...' : '删除'}
+                                                </button>
+                                            )}
                                         </span>
                                         {isActive && (
                                             <button
