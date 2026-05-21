@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import './ArchiveModal.css';
 import './ProfileModal.css';
 
@@ -9,7 +9,9 @@ function ProfileModal({ isOpen, onClose, onProfileSelected, onAdjustDisplay }) {
     const [currentProfileId, setCurrentProfileId] = useState('');
     const [loading, setLoading] = useState(false);
     const [selectingId, setSelectingId] = useState('');
+    const [uploading, setUploading] = useState(false);
     const [error, setError] = useState('');
+    const fileInputRef = useRef(null);
 
     const loadProfiles = async () => {
         setLoading(true);
@@ -64,6 +66,41 @@ function ProfileModal({ isOpen, onClose, onProfileSelected, onAdjustDisplay }) {
         }
     };
 
+    const handleImportClick = () => {
+        if (uploading) return;
+        fileInputRef.current?.click();
+    };
+
+    const handleUploadLive2D = async (event) => {
+        const selectedFile = event.target.files?.[0];
+        event.target.value = '';
+        if (!selectedFile || uploading) return;
+
+        setUploading(true);
+        setError('');
+        try {
+            const formData = new FormData();
+            formData.append('file', selectedFile);
+
+            const res = await fetch(`${API_BASE}/upload-live2d`, {
+                method: 'POST',
+                body: formData,
+            });
+            const data = await res.json().catch(() => ({}));
+
+            if (!res.ok || data.success === false) {
+                throw new Error(data.detail || data.error || '导入 Live2D 模型失败');
+            }
+
+            await loadProfiles();
+        } catch (err) {
+            console.error('导入 Live2D 模型失败:', err);
+            setError(err.message || '导入 Live2D 模型失败');
+        } finally {
+            setUploading(false);
+        }
+    };
+
     if (!isOpen) return null;
 
     const CloseIcon = () => (
@@ -77,9 +114,26 @@ function ProfileModal({ isOpen, onClose, onProfileSelected, onAdjustDisplay }) {
             <div className="archive-modal profile-modal" onClick={e => e.stopPropagation()}>
                 <div className="archive-modal-header">
                     <h2>人格管理</h2>
-                    <button className="archive-close-btn" onClick={onClose} title="关闭">
-                        <CloseIcon />
-                    </button>
+                    <div className="profile-header-actions">
+                        <button
+                            type="button"
+                            className="profile-import-btn"
+                            onClick={handleImportClick}
+                            disabled={uploading}
+                        >
+                            {uploading ? '导入中...' : '导入 Live2D 模型 ZIP'}
+                        </button>
+                        <input
+                            ref={fileInputRef}
+                            type="file"
+                            accept=".zip"
+                            onChange={handleUploadLive2D}
+                            style={{ display: 'none' }}
+                        />
+                        <button className="archive-close-btn" onClick={onClose} title="关闭">
+                            <CloseIcon />
+                        </button>
+                    </div>
                 </div>
 
                 {error && (

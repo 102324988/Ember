@@ -3,7 +3,21 @@ import asyncio
 import time
 import logging
 import os
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+import shutil
+import stat
+import tempfile
+import uuid
+import zipfile
+from pathlib import Path, PurePosixPath
+from fastapi import (
+    FastAPI,
+    WebSocket,
+    WebSocketDisconnect,
+    HTTPException,
+    UploadFile,
+    File,
+    Form,
+)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -26,6 +40,9 @@ from archive import ArchiveManager
 # Configure logging
 logger = get_logger(__name__)
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+USER_LIVE2D_DIR = os.path.join(BASE_DIR, "data", "user_live2d")
+MAX_LIVE2D_ZIP_BYTES = 200 * 1024 * 1024
+MAX_LIVE2D_EXTRACTED_BYTES = 500 * 1024 * 1024
 DEFAULT_PROFILE_DISPLAY = {
     "scale": 1.0,
     "offset_x": 0,
@@ -174,6 +191,118 @@ class EmberServer:
         with open(profiles_path, "w", encoding="utf-8") as f:
             json.dump(profiles_config, f, ensure_ascii=False, indent=2)
 
+    async def _save_limited_upload(self, upload: UploadFile, target_path: Path) -> int:
+        total_size = 0
+        with target_path.open("wb") as f:
+            while True:
+                chunk = await upload.read(1024 * 1024)
+                if not chunk:
+                    break
+                total_size += len(chunk)
+                if total_size > MAX_LIVE2D_ZIP_BYTES:
+                    raise HTTPException(status_code=413, detail="ZIP 文件不能超过 200MB")
+                f.write(chunk)
+        if total_size == 0:
+            raise HTTPException(status_code=400, detail="上传文件为空")
+        return total_size
+
+    def _safe_zip_target(self, extract_root: Path, member_name: str) -> Path:
+        normalized_name = member_name.replace("\\", "/")
+        member_path = PurePosixPath(normalized_name)
+        if (
+            not normalized_name
+            or "\x00" in normalized_name
+            or member_path.is_absolute()
+            or any(part in ("", ".", "..") for part in member_path.parts)
+            or any(":" in part for part in member_path.parts)
+        ):
+            raise HTTPException(status_code=400, detail="ZIP 内包含不安全路径")
+
+        root = extract_root.resolve()
+        target = (root / Path(*member_path.parts)).resolve()
+        try:
+            target.relative_to(root)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="ZIP 内包含路径逃逸")
+        return target
+
+    def _validate_and_extract_live2d_zip(self, zip_path: Path, extract_root: Path) -> list[Path]:
+        if not zipfile.is_zipfile(zip_path):
+            raise HTTPException(status_code=400, detail="上传文件不是有效的 ZIP")
+
+        extract_root.mkdir(parents=True, exist_ok=False)
+        total_declared_size = 0
+        total_extracted_size = 0
+        seen_targets: set[str] = set()
+
+        try:
+            with zipfile.ZipFile(zip_path) as zf:
+                members = zf.infolist()
+                if not members:
+                    raise HTTPException(status_code=400, detail="ZIP 文件为空")
+
+                safe_members: list[tuple[zipfile.ZipInfo, Path]] = []
+                for info in members:
+                    target = self._safe_zip_target(extract_root, info.filename)
+                    target_key = os.path.normcase(str(target))
+                    if target_key in seen_targets:
+                        raise HTTPException(status_code=400, detail="ZIP 内包含重复路径")
+                    seen_targets.add(target_key)
+
+                    mode = info.external_attr >> 16
+                    if stat.S_ISLNK(mode):
+                        raise HTTPException(status_code=400, detail="ZIP 内不允许包含符号链接")
+
+                    total_declared_size += info.file_size
+                    if total_declared_size > MAX_LIVE2D_EXTRACTED_BYTES:
+                        raise HTTPException(status_code=413, detail="解压后文件总大小不能超过 500MB")
+                    safe_members.append((info, target))
+
+                file_target_keys = {
+                    os.path.normcase(str(target))
+                    for info, target in safe_members
+                    if not info.is_dir()
+                }
+                root = extract_root.resolve()
+                for info, target in safe_members:
+                    if info.is_dir():
+                        continue
+                    for parent in target.parents:
+                        if parent == root:
+                            break
+                        if os.path.normcase(str(parent)) in file_target_keys:
+                            raise HTTPException(status_code=400, detail="ZIP 内包含冲突路径")
+
+                for info, target in safe_members:
+                    if info.is_dir():
+                        target.mkdir(parents=True, exist_ok=True)
+                        continue
+
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    with zf.open(info) as source, target.open("wb") as dest:
+                        while True:
+                            chunk = source.read(1024 * 1024)
+                            if not chunk:
+                                break
+                            total_extracted_size += len(chunk)
+                            if total_extracted_size > MAX_LIVE2D_EXTRACTED_BYTES:
+                                raise HTTPException(status_code=413, detail="解压后文件总大小不能超过 500MB")
+                            dest.write(chunk)
+        except zipfile.BadZipFile:
+            raise HTTPException(status_code=400, detail="上传文件不是有效的 ZIP")
+
+        return [
+            path
+            for path in extract_root.rglob("*")
+            if path.is_file() and path.name.lower().endswith(".model3.json")
+        ]
+
+    def _build_uploaded_profile_name(self, upload: UploadFile, name: str | None) -> str:
+        profile_name = (name or "").strip()
+        if not profile_name:
+            profile_name = Path(upload.filename or "Imported Live2D").stem.strip()
+        return profile_name[:80] or "Imported Live2D"
+
     def _get_current_profile(self) -> dict:
         profiles_config = self._load_profiles_config()
         current_profile_id = profiles_config.get("current_profile_id")
@@ -211,6 +340,13 @@ class EmberServer:
         audio_dir = "data/audio"
         os.makedirs(audio_dir, exist_ok=True)
         self.app.mount("/audio", StaticFiles(directory=audio_dir), name="audio")
+
+        os.makedirs(USER_LIVE2D_DIR, exist_ok=True)
+        self.app.mount(
+            "/user_live2d",
+            StaticFiles(directory=USER_LIVE2D_DIR),
+            name="user_live2d",
+        )
 
         @self.app.get("/config")
         async def get_config():
@@ -319,6 +455,52 @@ class EmberServer:
                 "success": True,
                 "profile": profile,
             }
+
+        @self.app.post("/api/profiles/upload-live2d")
+        async def upload_live2d_profile(
+            file: UploadFile = File(...),
+            name: Optional[str] = Form(None),
+        ):
+            filename = file.filename or ""
+            if not filename.lower().endswith(".zip"):
+                raise HTTPException(status_code=400, detail="只支持上传 .zip 文件")
+
+            with tempfile.TemporaryDirectory(prefix="ember_live2d_") as temp_dir:
+                temp_root = Path(temp_dir)
+                zip_path = temp_root / "upload.zip"
+                extract_root = temp_root / "extracted"
+
+                await self._save_limited_upload(file, zip_path)
+                model_files = self._validate_and_extract_live2d_zip(zip_path, extract_root)
+
+                if not model_files:
+                    raise HTTPException(status_code=400, detail="ZIP 中未找到 .model3.json")
+                if len(model_files) > 1:
+                    raise HTTPException(status_code=400, detail="暂不支持多模型包")
+
+                profile_id = f"custom_{int(time.time())}_{uuid.uuid4().hex[:8]}"
+                final_dir = Path(USER_LIVE2D_DIR) / profile_id
+                if final_dir.exists():
+                    raise HTTPException(status_code=409, detail="模型目录已存在，请重试")
+
+                model_rel_path = model_files[0].relative_to(extract_root).as_posix()
+                shutil.move(str(extract_root), str(final_dir))
+
+            profile = {
+                "id": profile_id,
+                "name": self._build_uploaded_profile_name(file, name),
+                "model_path": f"http://localhost:8000/user_live2d/{profile_id}/{model_rel_path}",
+                "display": self._normalize_profile_display(DEFAULT_PROFILE_DISPLAY),
+                "source": "upload",
+            }
+
+            profiles_config = self._load_profiles_config()
+            profiles_config.setdefault("profiles", []).append(profile)
+            if "current_profile_id" not in profiles_config:
+                profiles_config["current_profile_id"] = ""
+            self._save_profiles_config(profiles_config)
+
+            return {"success": True, "profile": profile}
 
         class ArchiveCreateRequest(BaseModel):
             slot_name: str
