@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import * as PIXI from 'pixi.js';
 import { Live2DModel } from 'pixi-live2d-display';
 import { LIVE2D_CONFIG } from './live2dConfig';
@@ -22,6 +22,7 @@ const DEFAULT_MODEL_DISPLAY = {
     offset_x: 0,
     offset_y: 0,
     anchor: { x: 0.5, y: 0.5 },
+    auto_fit: true,
 };
 
 const normalizeModelDisplay = (display) => ({
@@ -32,6 +33,7 @@ const normalizeModelDisplay = (display) => ({
         x: Number.isFinite(display?.anchor?.x) ? display.anchor.x : DEFAULT_MODEL_DISPLAY.anchor.x,
         y: Number.isFinite(display?.anchor?.y) ? display.anchor.y : DEFAULT_MODEL_DISPLAY.anchor.y,
     },
+    auto_fit: typeof display?.auto_fit === 'boolean' ? display.auto_fit : DEFAULT_MODEL_DISPLAY.auto_fit,
 });
 
 const getViewportSize = () => ({
@@ -55,7 +57,7 @@ const Live2DViewer = ({ currentEmotion, audio, modelPath, modelDisplay, adjustMo
     useEffect(() => { onTouchRef.current = onTouch; }, [onTouch]);
     useEffect(() => { modelDisplayRef.current = modelDisplay; }, [modelDisplay]);
 
-    const applyDisplayToModel = (display) => {
+    const applyDisplayToModel = useCallback((display) => {
         const app = appRef.current;
         const model = modelRef.current;
         if (!app || !model) return;
@@ -65,9 +67,46 @@ const Live2DViewer = ({ currentEmotion, audio, modelPath, modelDisplay, adjustMo
         model.x = (app.renderer.width / 2) + normalizedDisplay.offset_x;
         model.y = (app.renderer.height / 2) + normalizedDisplay.offset_y;
         model.scale.set(baseScaleRef.current * normalizedDisplay.scale);
-    };
+    }, []);
 
-    const recalculateBaseScale = () => {
+    const keepModelInViewport = useCallback((margin = 24) => {
+        const app = appRef.current;
+        const model = modelRef.current;
+        if (!app || !model || typeof model.getBounds !== 'function') return;
+
+        const bounds = model.getBounds();
+        if (!bounds) return;
+
+        const viewportWidth = app.renderer.width;
+        const viewportHeight = app.renderer.height;
+        let dx = 0;
+        let dy = 0;
+
+        if (bounds.left < margin) {
+            dx = margin - bounds.left;
+        } else if (bounds.right > viewportWidth - margin) {
+            dx = (viewportWidth - margin) - bounds.right;
+        }
+
+        if (bounds.top < margin) {
+            dy = margin - bounds.top;
+        } else if (bounds.bottom > viewportHeight - margin) {
+            dy = (viewportHeight - margin) - bounds.bottom;
+        }
+
+        if (dx !== 0) model.x += dx;
+        if (dy !== 0) model.y += dy;
+    }, []);
+
+    const applyDisplayWithAutoFit = useCallback((display) => {
+        const normalizedDisplay = normalizeModelDisplay(display);
+        applyDisplayToModel(normalizedDisplay);
+        if (normalizedDisplay.auto_fit !== false) {
+            keepModelInViewport(24);
+        }
+    }, [applyDisplayToModel, keepModelInViewport]);
+
+    const recalculateBaseScale = useCallback(() => {
         const app = appRef.current;
         const model = modelRef.current;
         if (!app || !model) return;
@@ -79,7 +118,7 @@ const Live2DViewer = ({ currentEmotion, audio, modelPath, modelDisplay, adjustMo
         if (!Number.isFinite(scaleX) || !Number.isFinite(scaleY)) return;
 
         baseScaleRef.current = Math.min(scaleX, scaleY) * (fitPadding ?? 1) * scale;
-    };
+    }, []);
 
     // 音频分析相关
     const analyserRef = useRef(null);
@@ -263,7 +302,7 @@ const Live2DViewer = ({ currentEmotion, audio, modelPath, modelDisplay, adjustMo
                 const latestViewport = getViewportSize();
                 app.renderer.resize(latestViewport.width, latestViewport.height);
                 recalculateBaseScale();
-                applyDisplayToModel(modelDisplayRef.current);
+                applyDisplayWithAutoFit(modelDisplayRef.current);
 
                 console.log("Live2D Model Loaded", {
                     url: targetPath,
@@ -295,7 +334,7 @@ const Live2DViewer = ({ currentEmotion, audio, modelPath, modelDisplay, adjustMo
                 modelRef.current = null;
             }
         };
-    }, [modelPath]);
+    }, [applyDisplayWithAutoFit, modelPath, recalculateBaseScale]);
 
     useEffect(() => {
         if (!appRef.current) return;
@@ -307,20 +346,24 @@ const Live2DViewer = ({ currentEmotion, audio, modelPath, modelDisplay, adjustMo
             const viewport = getViewportSize();
             app.renderer.resize(viewport.width, viewport.height);
             recalculateBaseScale();
-            applyDisplayToModel(modelDisplayRef.current);
+            applyDisplayWithAutoFit(modelDisplayRef.current);
         };
 
         window.addEventListener('resize', handleResize);
         return () => {
             window.removeEventListener('resize', handleResize);
         };
-    }, [modelLoaded]);
+    }, [applyDisplayWithAutoFit, modelLoaded, recalculateBaseScale]);
 
     useEffect(() => {
         if (modelLoaded) {
-            applyDisplayToModel(modelDisplay);
+            if (adjustMode) {
+                applyDisplayToModel(modelDisplay);
+            } else {
+                applyDisplayWithAutoFit(modelDisplay);
+            }
         }
-    }, [modelDisplay, modelLoaded]);
+    }, [adjustMode, applyDisplayToModel, applyDisplayWithAutoFit, modelDisplay, modelLoaded]);
 
     useEffect(() => {
         if (modelLoaded && modelRef.current && currentEmotion) {

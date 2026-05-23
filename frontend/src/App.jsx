@@ -10,6 +10,7 @@ const DEFAULT_MODEL_DISPLAY = {
   offset_x: 0,
   offset_y: 0,
   anchor: { x: 0.5, y: 0.5 },
+  auto_fit: true,
 };
 
 const normalizeModelDisplay = (display) => ({
@@ -20,6 +21,7 @@ const normalizeModelDisplay = (display) => ({
     x: Number.isFinite(display?.anchor?.x) ? display.anchor.x : DEFAULT_MODEL_DISPLAY.anchor.x,
     y: Number.isFinite(display?.anchor?.y) ? display.anchor.y : DEFAULT_MODEL_DISPLAY.anchor.y,
   },
+  auto_fit: typeof display?.auto_fit === 'boolean' ? display.auto_fit : DEFAULT_MODEL_DISPLAY.auto_fit,
 });
 
 function App() {
@@ -196,14 +198,17 @@ function App() {
   };
 
   const resetDisplayAdjust = () => {
-    setAdjustDisplay(DEFAULT_MODEL_DISPLAY);
+    setAdjustDisplay({ ...DEFAULT_MODEL_DISPLAY, anchor: { ...DEFAULT_MODEL_DISPLAY.anchor } });
   };
 
   const saveDisplayAdjust = async () => {
     if (!adjustProfileId) return;
 
     try {
-      const display = normalizeModelDisplay(adjustDisplay);
+      const display = {
+        ...normalizeModelDisplay(adjustDisplay),
+        auto_fit: false,
+      };
       const res = await fetch("http://localhost:8000/api/profiles/display", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
