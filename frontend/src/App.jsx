@@ -13,6 +13,23 @@ const DEFAULT_MODEL_DISPLAY = {
   auto_fit: true,
 };
 
+const DEFAULT_PROFILE_DISPLAYS = {
+  yachiyo: {
+    scale: 0.86,
+    offset_x: -299,
+    offset_y: 6,
+    anchor: { x: 0.5, y: 0.5 },
+    auto_fit: false,
+  },
+  lss: {
+    scale: 0.33,
+    offset_x: -306,
+    offset_y: -292,
+    anchor: { x: 0.5, y: 0.5 },
+    auto_fit: false,
+  },
+};
+
 const normalizeModelDisplay = (display) => ({
   scale: Number.isFinite(display?.scale) ? display.scale : DEFAULT_MODEL_DISPLAY.scale,
   offset_x: Number.isFinite(display?.offset_x) ? display.offset_x : DEFAULT_MODEL_DISPLAY.offset_x,
@@ -23,6 +40,10 @@ const normalizeModelDisplay = (display) => ({
   },
   auto_fit: typeof display?.auto_fit === 'boolean' ? display.auto_fit : DEFAULT_MODEL_DISPLAY.auto_fit,
 });
+
+const getDefaultProfileDisplay = (profileId) => (
+  normalizeModelDisplay(DEFAULT_PROFILE_DISPLAYS[profileId] || DEFAULT_MODEL_DISPLAY)
+);
 
 function App() {
   const [messages, setMessages] = useState([]);
@@ -198,7 +219,7 @@ function App() {
   };
 
   const resetDisplayAdjust = () => {
-    setAdjustDisplay({ ...DEFAULT_MODEL_DISPLAY, anchor: { ...DEFAULT_MODEL_DISPLAY.anchor } });
+    setAdjustDisplay(getDefaultProfileDisplay(adjustProfileId));
   };
 
   const saveDisplayAdjust = async () => {
