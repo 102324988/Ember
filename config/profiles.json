@@ -6,14 +6,14 @@
       "name": "八千代辉夜姬",
       "model_path": "/models/yachiyo/八千代辉夜姬.model3.json",
       "display": {
-        "scale": 1,
-        "offset_x": -603,
-        "offset_y": -69,
+        "scale": 0.86,
+        "offset_x": -299,
+        "offset_y": 6,
         "anchor": {
           "x": 0.5,
           "y": 0.5
         },
-        "auto_fit": true
+        "auto_fit": false
       }
     },
     {
@@ -21,14 +21,14 @@
       "name": "LSS",
       "model_path": "/models/LSS/LSS.model3.json",
       "display": {
-        "scale": 0.54,
-        "offset_x": -614,
-        "offset_y": -891,
+        "scale": 0.33,
+        "offset_x": -306,
+        "offset_y": -292,
         "anchor": {
           "x": 0.5,
           "y": 0.5
         },
-        "auto_fit": true
+        "auto_fit": false
       }
     }
   ]
