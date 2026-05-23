@@ -10,6 +10,24 @@ const DEFAULT_MODEL_DISPLAY = {
   offset_x: 0,
   offset_y: 0,
   anchor: { x: 0.5, y: 0.5 },
+  auto_fit: true,
+};
+
+const DEFAULT_PROFILE_DISPLAYS = {
+  yachiyo: {
+    scale: 0.86,
+    offset_x: -299,
+    offset_y: 6,
+    anchor: { x: 0.5, y: 0.5 },
+    auto_fit: false,
+  },
+  lss: {
+    scale: 0.33,
+    offset_x: -306,
+    offset_y: -292,
+    anchor: { x: 0.5, y: 0.5 },
+    auto_fit: false,
+  },
 };
 
 const normalizeModelDisplay = (display) => ({
@@ -20,7 +38,12 @@ const normalizeModelDisplay = (display) => ({
     x: Number.isFinite(display?.anchor?.x) ? display.anchor.x : DEFAULT_MODEL_DISPLAY.anchor.x,
     y: Number.isFinite(display?.anchor?.y) ? display.anchor.y : DEFAULT_MODEL_DISPLAY.anchor.y,
   },
+  auto_fit: typeof display?.auto_fit === 'boolean' ? display.auto_fit : DEFAULT_MODEL_DISPLAY.auto_fit,
 });
+
+const getDefaultProfileDisplay = (profileId) => (
+  normalizeModelDisplay(DEFAULT_PROFILE_DISPLAYS[profileId] || DEFAULT_MODEL_DISPLAY)
+);
 
 function App() {
   const [messages, setMessages] = useState([]);
@@ -196,14 +219,17 @@ function App() {
   };
 
   const resetDisplayAdjust = () => {
-    setAdjustDisplay(DEFAULT_MODEL_DISPLAY);
+    setAdjustDisplay(getDefaultProfileDisplay(adjustProfileId));
   };
 
   const saveDisplayAdjust = async () => {
     if (!adjustProfileId) return;
 
     try {
-      const display = normalizeModelDisplay(adjustDisplay);
+      const display = {
+        ...normalizeModelDisplay(adjustDisplay),
+        auto_fit: false,
+      };
       const res = await fetch("http://localhost:8000/api/profiles/display", {
         method: "POST",
         headers: { "Content-Type": "application/json" },

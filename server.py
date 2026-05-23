@@ -49,6 +49,7 @@ DEFAULT_PROFILE_DISPLAY = {
     "offset_x": 0,
     "offset_y": 0,
     "anchor": {"x": 0.5, "y": 0.5},
+    "auto_fit": True,
 }
 
 
@@ -147,6 +148,9 @@ class EmberServer:
         def number_or_default(value, default):
             return value if isinstance(value, (int, float)) else default
 
+        def bool_or_default(value, default):
+            return value if isinstance(value, bool) else default
+
         return {
             "scale": number_or_default(display.get("scale"), DEFAULT_PROFILE_DISPLAY["scale"]),
             "offset_x": number_or_default(display.get("offset_x"), DEFAULT_PROFILE_DISPLAY["offset_x"]),
@@ -155,6 +159,7 @@ class EmberServer:
                 "x": number_or_default(anchor.get("x"), DEFAULT_PROFILE_DISPLAY["anchor"]["x"]),
                 "y": number_or_default(anchor.get("y"), DEFAULT_PROFILE_DISPLAY["anchor"]["y"]),
             },
+            "auto_fit": bool_or_default(display.get("auto_fit"), DEFAULT_PROFILE_DISPLAY["auto_fit"]),
         }
 
     def _load_profiles_config(self) -> dict:

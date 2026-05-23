@@ -12,8 +12,10 @@ export const LIVE2D_CONFIG = {
         id: 'live2d-canvas',
         style: {
             position: 'fixed',
-            bottom: 0,
-            right: 0,
+            left: 0,
+            top: 0,
+            width: '100vw',
+            height: '100vh',
             zIndex: 1,
             pointerEvents: 'none'
         }
