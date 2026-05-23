@@ -10,6 +10,24 @@ const DEFAULT_MODEL_DISPLAY = {
   offset_x: 0,
   offset_y: 0,
   anchor: { x: 0.5, y: 0.5 },
+  auto_fit: true,
+};
+
+const DEFAULT_PROFILE_DISPLAYS = {
+  yachiyo: {
+    scale: 0.86,
+    offset_x: -299,
+    offset_y: 6,
+    anchor: { x: 0.5, y: 0.5 },
+    auto_fit: false,
+  },
+  lss: {
+    scale: 0.33,
+    offset_x: -306,
+    offset_y: -292,
+    anchor: { x: 0.5, y: 0.5 },
+    auto_fit: false,
+  },
 };
 
 const normalizeModelDisplay = (display) => ({
@@ -20,7 +38,12 @@ const normalizeModelDisplay = (display) => ({
     x: Number.isFinite(display?.anchor?.x) ? display.anchor.x : DEFAULT_MODEL_DISPLAY.anchor.x,
     y: Number.isFinite(display?.anchor?.y) ? display.anchor.y : DEFAULT_MODEL_DISPLAY.anchor.y,
   },
+  auto_fit: typeof display?.auto_fit === 'boolean' ? display.auto_fit : DEFAULT_MODEL_DISPLAY.auto_fit,
 });
+
+const getDefaultProfileDisplay = (profileId) => (
+  normalizeModelDisplay(DEFAULT_PROFILE_DISPLAYS[profileId] || DEFAULT_MODEL_DISPLAY)
+);
 
 function App() {
   const [messages, setMessages] = useState([]);
@@ -196,14 +219,17 @@ function App() {
   };
 
   const resetDisplayAdjust = () => {
-    setAdjustDisplay(DEFAULT_MODEL_DISPLAY);
+    setAdjustDisplay(getDefaultProfileDisplay(adjustProfileId));
   };
 
   const saveDisplayAdjust = async () => {
     if (!adjustProfileId) return;
 
     try {
-      const display = normalizeModelDisplay(adjustDisplay);
+      const display = {
+        ...normalizeModelDisplay(adjustDisplay),
+        auto_fit: false,
+      };
       const res = await fetch("http://localhost:8000/api/profiles/display", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -372,22 +398,29 @@ function App() {
         setCurrentEmotion(emotion);
       }
 
-      const audio = new Audio(`data:audio/wav;base64,${audioObj.content}`);
-      setCurrentAudio(audio);
+      if (audioObj.content) {
+        const audio = new Audio(`data:audio/wav;base64,${audioObj.content}`);
+        setCurrentAudio(audio);
 
-      audio.onended = () => {
-        isPlaying.current = false;
-        setCurrentAudio(null);
-        nextPlayIndex.current += 1; // 播放下一号
-        playNextAudio();
-      };
+        audio.onended = () => {
+          isPlaying.current = false;
+          setCurrentAudio(null);
+          nextPlayIndex.current += 1; // 播放下一号
+          playNextAudio();
+        };
 
-      audio.play().catch(err => {
-        console.error("播放音频失败:", err);
+        audio.play().catch(err => {
+          console.error("播放音频失败:", err);
+          isPlaying.current = false;
+          nextPlayIndex.current += 1;
+          playNextAudio();
+        });
+      } else {
+        // 如果是空段（获取失败或只更新文本），直接跳过
         isPlaying.current = false;
         nextPlayIndex.current += 1;
-        playNextAudio();
-      });
+        setTimeout(() => playNextAudio(), 0);
+      }
     }
   };
 
@@ -502,6 +535,31 @@ function App() {
           }
           else if (data.type === 'voice') {
             audioQueue.current[data.index] = data;
+            playNextAudio();
+          }
+          else if (data.type === 'audio_chunk') {
+            // 智能分段合成的片段
+            console.log(`收到 Base64 语音分段: [${data.index + 1}/${data.total}]`);
+
+            // 如果收到的是第一个片段，重置播放队列状态（用于手动点击旧消息或者开始新的 LLM 回复）
+            if (data.index === 0) {
+              if (currentAudio) {
+                currentAudio.pause();
+                setCurrentAudio(null);
+              }
+              audioQueue.current = {};
+              nextPlayIndex.current = 0;
+              isPlaying.current = false;
+            }
+
+            // 重组为 playNextAudio 能处理的格式
+            const chunkData = {
+              content: data.audio_base64,
+              id: data.id || Date.now() + data.index,
+              live2d_emotion: data.live2d_emotion
+              // 不再传递 text，因为文字已经通过 llm.chunk 流式显示了，防止在界面重复渲染
+            };
+            audioQueue.current[data.index] = chunkData;
             playNextAudio();
           }
           else if (data.type === 'audio') {

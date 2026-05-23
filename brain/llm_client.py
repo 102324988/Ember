@@ -176,7 +176,7 @@ class LLMClient:
                     return None
         return None
 
-    def stream_chat(self, model_config, messages, call_type: str = "dialogue"):
+    def stream_chat(self, model_config, messages, timeout=60, call_type: str = "dialogue"):
         """流式对话
 
         call_type: 用于区分调用来源，默认 dialogue（对话类调用）
@@ -195,6 +195,7 @@ class LLMClient:
                 stream=True,
                 stream_options={"include_usage": True},
                 temperature=settings.LLM_TEMPERATURE,
+                timeout=timeout,
             )
 
             last_usage = None
