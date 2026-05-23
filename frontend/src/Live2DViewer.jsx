@@ -34,6 +34,11 @@ const normalizeModelDisplay = (display) => ({
     },
 });
 
+const getViewportSize = () => ({
+    width: window.innerWidth || LIVE2D_CONFIG.canvas.width,
+    height: window.innerHeight || LIVE2D_CONFIG.canvas.height,
+});
+
 const Live2DViewer = ({ currentEmotion, audio, modelPath, modelDisplay, adjustMode, onDisplayChange, onTouch }) => {
     const canvasRef = useRef(null);
     const appRef = useRef(null);
@@ -60,6 +65,20 @@ const Live2DViewer = ({ currentEmotion, audio, modelPath, modelDisplay, adjustMo
         model.x = (app.renderer.width / 2) + normalizedDisplay.offset_x;
         model.y = (app.renderer.height / 2) + normalizedDisplay.offset_y;
         model.scale.set(baseScaleRef.current * normalizedDisplay.scale);
+    };
+
+    const recalculateBaseScale = () => {
+        const app = appRef.current;
+        const model = modelRef.current;
+        if (!app || !model) return;
+
+        model.scale.set(1);
+        const { fitPadding, scale } = LIVE2D_CONFIG.model;
+        const scaleX = app.renderer.width / model.width;
+        const scaleY = app.renderer.height / model.height;
+        if (!Number.isFinite(scaleX) || !Number.isFinite(scaleY)) return;
+
+        baseScaleRef.current = Math.min(scaleX, scaleY) * (fitPadding ?? 1) * scale;
     };
 
     // 音频分析相关
@@ -212,10 +231,11 @@ const Live2DViewer = ({ currentEmotion, audio, modelPath, modelDisplay, adjustMo
 
         const init = async () => {
             try {
+                const viewport = getViewportSize();
                 const app = new PIXI.Application({
                     view: canvasRef.current,
-                    width: LIVE2D_CONFIG.canvas.width,
-                    height: LIVE2D_CONFIG.canvas.height,
+                    width: viewport.width,
+                    height: viewport.height,
                     backgroundAlpha: LIVE2D_CONFIG.pixi.transparent ? 0 : 1,
                     autoDensity: true,
                     resolution: window.devicePixelRatio || 1,
@@ -240,11 +260,9 @@ const Live2DViewer = ({ currentEmotion, audio, modelPath, modelDisplay, adjustMo
                 modelRef.current = model;
                 app.stage.addChild(model);
 
-                model.scale.set(1);
-                const { fitPadding, scale } = LIVE2D_CONFIG.model;
-                const scaleX = app.renderer.width / model.width;
-                const scaleY = app.renderer.height / model.height;
-                baseScaleRef.current = Math.min(scaleX, scaleY) * (fitPadding ?? 1) * scale;
+                const latestViewport = getViewportSize();
+                app.renderer.resize(latestViewport.width, latestViewport.height);
+                recalculateBaseScale();
                 applyDisplayToModel(modelDisplayRef.current);
 
                 console.log("Live2D Model Loaded", {
@@ -278,6 +296,25 @@ const Live2DViewer = ({ currentEmotion, audio, modelPath, modelDisplay, adjustMo
             }
         };
     }, [modelPath]);
+
+    useEffect(() => {
+        if (!appRef.current) return;
+
+        const handleResize = () => {
+            const app = appRef.current;
+            if (!app) return;
+
+            const viewport = getViewportSize();
+            app.renderer.resize(viewport.width, viewport.height);
+            recalculateBaseScale();
+            applyDisplayToModel(modelDisplayRef.current);
+        };
+
+        window.addEventListener('resize', handleResize);
+        return () => {
+            window.removeEventListener('resize', handleResize);
+        };
+    }, [modelLoaded]);
 
     useEffect(() => {
         if (modelLoaded) {

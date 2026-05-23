@@ -1045,32 +1045,23 @@
 }
 
 #live2d-canvas {
-  /* 禁止鼠标交互（从而关闭视线跟随），同时允许点击穿透到下方元素 */
+  /* Let normal clicks pass through to the app chrome. */
   pointer-events: none !important;
 
-  /* 强制可见性 */
+  /* Keep the canvas visible even when other styles are active. */
   opacity: 1 !important;
   visibility: visible !important;
 
-  /* 确保 display 不被覆盖 */
+  /* Keep display from being overridden. */
   display: block;
 
-  /* 层级设置：高于背景，但低于输入框(10000) */
-  z-index: 9999;
-
-
-  /* --- 位置与大小调整 --- */
+  /* Render Live2D across the full viewport; adjust mode controls interaction. */
+  z-index: 1;
   position: fixed;
-  bottom: -20px;
-  /*稍微下沉一点，隐藏模型底部切边*/
-  right: 0px;
-  /*稍微向右偏移*/
-
-  /* 使用 CSS transform 进行缩放，比修改 CanvasSize 分辨率性能更好且更灵活 */
-  transform-origin: bottom right;
-  /* 缩放基点设为右下角 */
-  transform: scale(0.35);
-  /* 根据需要调整缩放比例 */
+  left: 0;
+  top: 0;
+  width: 100vw;
+  height: 100vh;
 }
 
 @media (max-width: 640px) {
