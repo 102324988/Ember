@@ -66,10 +66,6 @@ class Brain:
         with self.lock:
             if self._is_processing:
                 logger.warning("正在处理中，忽略新输入")
-                # 触发事件告诉前端解锁 UI
-                self.event_bus.publish(Event(name="llm.started", data=""))
-                self.event_bus.publish(Event(name="llm.chunk", data={"text": "[系统: 思考被中断或正在处理中，请稍后再试]"}))
-                self.event_bus.publish(Event(name="llm.finished", data={"text": ""}))
                 return
             self._is_processing = True
 
