@@ -139,7 +139,12 @@ class LLMClient:
         )
 
     def one_chat(
-        self, model_config, messages, timeout=60, call_type: str = "state_update"
+        self,
+        model_config,
+        messages,
+        timeout=60,
+        call_type: str = "state_update",
+        enable_thought=False,
     ):
         """单次对话，带超时和重试
 
@@ -150,6 +155,10 @@ class LLMClient:
             if model_config == settings.LARGE_LLM
             else self.small_client
         )
+        if enable_thought:
+            extra_body = {"thinking": {"type": "enabled"}}
+        else:
+            extra_body = {"thinking": {"type": "disabled"}}
 
         max_retries = 2
         for attempt in range(max_retries):
@@ -157,7 +166,7 @@ class LLMClient:
                 response = client.chat.completions.create(
                     model=model_config.name,
                     messages=messages,
-                    extra_body={"enable_thinking": False},
+                    extra_body=extra_body,
                     stream=False,
                     temperature=settings.LLM_TEMPERATURE,
                     timeout=timeout,
@@ -176,7 +185,9 @@ class LLMClient:
                     return None
         return None
 
-    def stream_chat(self, model_config, messages, call_type: str = "dialogue"):
+    def stream_chat(
+        self, model_config, messages, call_type: str = "dialogue", enable_thought=False
+    ):
         """流式对话
 
         call_type: 用于区分调用来源，默认 dialogue（对话类调用）
@@ -186,12 +197,15 @@ class LLMClient:
             if model_config == settings.LARGE_LLM
             else self.small_client
         )
-
+        if enable_thought:
+            extra_body = {"thinking": {"type": "enabled"}}
+        else:
+            extra_body = {"thinking": {"type": "disabled"}}
         try:
             response = client.chat.completions.create(
                 model=model_config.name,
                 messages=messages,
-                extra_body={"enable_thinking": False},
+                extra_body=extra_body,
                 stream=True,
                 stream_options={"include_usage": True},
                 temperature=settings.LLM_TEMPERATURE,
@@ -206,9 +220,10 @@ class LLMClient:
                 if not chunk.choices:
                     continue
 
+                # 思考内容不返回给前端，静默丢弃
                 reasoning = getattr(chunk.choices[0].delta, "reasoning_content", None)
                 if reasoning:
-                    yield reasoning
+                    continue
 
                 content = chunk.choices[0].delta.content
                 if content is not None:
@@ -254,48 +269,50 @@ class LLMClient:
             if "qwen-image" in model_config.name.lower():
                 import urllib.request
                 import json
-                
+
                 if not base_url.endswith("/generation"):
                     base_url = "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation"
-                
+
                 headers = {
                     "Content-Type": "application/json",
                     "Authorization": f"Bearer {api_key}",
-                    "X-DashScope-Async": "disable" # qwen-image-2.0-pro supports sync request
+                    "X-DashScope-Async": "disable",  # qwen-image-2.0-pro supports sync request
                 }
-                
+
                 payload = {
                     "model": model_config.name,
                     "input": {
-                        "messages": [
-                            {
-                                "role": "user",
-                                "content": [
-                                    {"text": prompt}
-                                ]
-                            }
-                        ]
+                        "messages": [{"role": "user", "content": [{"text": prompt}]}]
                     },
                     "parameters": {
                         "size": "2688*1536",
                         "negative_prompt": "低分辨率，低画质，肢体畸形，手指畸形，画面过饱和，蜡像感，人脸无细节，过度光滑，画面具有AI感，构图混乱。",
                         "prompt_extend": True,
-                        "watermark": False
-                    }
+                        "watermark": False,
+                    },
                 }
-                
-                logger.info(f"正在使用原生 HTTP 请求 DashScope API 生成图片: {model_config.name}")
-                req = urllib.request.Request(base_url, data=json.dumps(payload).encode('utf-8'), headers=headers, method="POST")
-                
+
+                logger.info(
+                    f"正在使用原生 HTTP 请求 DashScope API 生成图片: {model_config.name}"
+                )
+                req = urllib.request.Request(
+                    base_url,
+                    data=json.dumps(payload).encode("utf-8"),
+                    headers=headers,
+                    method="POST",
+                )
+
                 with urllib.request.urlopen(req, timeout=60) as resp:
-                    raw_data = resp.read().decode('utf-8')
+                    raw_data = resp.read().decode("utf-8")
                     data = json.loads(raw_data)
-                
+
                 try:
                     url = data["output"]["choices"][0]["message"]["content"][0]["image"]
                     return url
                 except (KeyError, IndexError) as err:
-                    logger.error(f"Image Generation failed to parse Qwen response: {data} -> {err}")
+                    logger.error(
+                        f"Image Generation failed to parse Qwen response: {data} -> {err}"
+                    )
                     return None
             else:
                 # 保留对标准 OpenAI API 的兼容 (DALL-E 3 等)
@@ -306,10 +323,9 @@ class LLMClient:
                     prompt=prompt,
                     n=1,
                     size="1024x1024",
-                    response_format="url"
+                    response_format="url",
                 )
                 return response.data[0].url
         except Exception as e:
             logger.error(f"Image Generation Error: {e}")
             return None
-
