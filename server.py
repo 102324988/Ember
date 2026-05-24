@@ -93,7 +93,7 @@ class EmberServer:
         self.loop = None
         self.current_ai_msg_id = None  # Track ongoing AI message ID
         self.current_full_text = ""  # Track full text for TTS
-        self._tts_semaphore = asyncio.Semaphore(3)  # 限制并发 TTS 数量为 3
+        self._tts_semaphore = asyncio.Semaphore(1)  # 限制 TTS 整体并发为 1（禁止多轮重叠，强串行保证稳定性）
 
         # Initialize components
         self.heartbeat = Heartbeat(self.event_bus, interval=settings.HEARTBEAT_INTERVAL)
@@ -790,24 +790,59 @@ class EmberServer:
         self.safe_broadcast({"type": "llm.done"})
 
     async def _process_tts(self, text):
-        """处理 TTS，限制并发数量"""
+        """处理 TTS，采用智能分段、顺序生成以避免多次建连限流，同时降低首段延迟"""
         if not text or not text.strip():
             return
 
-        # 使用信号量限制并发
+        # 前置处理：移除所有的 <thought>...</thought> 思考过程，防止把内部计划读出声
+        from brain.tag_utils import remove_thought_content
+        clean_text = remove_thought_content(text)
+        
+        if not clean_text or not clean_text.strip():
+            return
+
+        # 使用信号量防止不同轮次的回复同时发起 TTS 请求（严格串行）
         async with self._tts_semaphore:
             try:
-                # 限制文本长度，防止超长文本导致性能问题
-                max_tts_length = 500
-                if len(text) > max_tts_length:
-                    text = text[:max_tts_length] + "..."
-                    logger.warning(f"TTS 文本过长，已截断至 {max_tts_length} 字符")
+                # 句子智能切割
+                sentences = self.tts_manager.split_sentences(clean_text)
+                
+                total_chunks = len(sentences)
+                if total_chunks == 0:
+                    return
+                    
+                logger.info(f"TTS 文本切割完毕，总段数: {total_chunks}")
 
-                base64_audio = await self.tts_manager.generate_base64(text)
-                logger.info(f"广播 Base64 TTS 音频 (长度: {len(base64_audio)})")
-                await self.manager.broadcast(
-                    {"type": "audio", "audio_base64": base64_audio}
-                )
+                for index, sentence in enumerate(sentences):
+                    # 避免极端情况长文本（兜底保护）
+                    max_tts_length = 500
+                    if len(sentence) > max_tts_length:
+                        sentence = sentence[:max_tts_length] + "..."
+                        logger.warning(f"TTS 单句文本过长，已截断至 {max_tts_length} 字符")
+
+                    base64_audio = await self.tts_manager.generate_base64(sentence)
+                    
+                    if base64_audio:
+                        logger.info(f"广播 Base64 TTS 音频 chunk [{index+1}/{total_chunks}] (长度: {len(base64_audio)})")
+                        await self.manager.broadcast(
+                            {
+                                "type": "audio_chunk", 
+                                "index": index,
+                                "total": total_chunks,
+                                "audio_base64": base64_audio
+                            }
+                        )
+                    else:
+                        logger.warning(f"TTS chunk [{index+1}/{total_chunks}] 合成失败，发送空段保持队列继续")
+                        await self.manager.broadcast(
+                            {
+                                "type": "audio_chunk", 
+                                "index": index,
+                                "total": total_chunks,
+                                "audio_base64": None
+                            }
+                        )
+
             except Exception as e:
                 logger.error(f"TTS 广播错误: {e}")
 
