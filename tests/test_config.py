@@ -65,14 +65,14 @@ class TestSettings:
         assert float("10.0") == 10.0
         assert float("1.5") == 1.5
 
-    def test_default_values(self):
+    def test_default_values(self, monkeypatch):
         """测试默认值配置"""
-        # 测试默认值的类型和范围
-        # HEARTBEAT_INTERVAL 默认 10
+        # 清除可能被 .env 设置的环境变量，确保测试的是真正的默认值
+        monkeypatch.delenv("HEARTBEAT_INTERVAL", raising=False)
+        monkeypatch.delenv("TIME_ACCEL_FACTOR", raising=False)
+        monkeypatch.delenv("CONTEXT_WINDOW_SIZE", raising=False)
         assert int(os.getenv("HEARTBEAT_INTERVAL", "10")) == 10
-        # TIME_ACCEL_FACTOR 默认 1.0
         assert float(os.getenv("TIME_ACCEL_FACTOR", "1.0")) == 1.0
-        # CONTEXT_WINDOW_SIZE 默认 20
         assert int(os.getenv("CONTEXT_WINDOW_SIZE", "20")) == 20
 
 

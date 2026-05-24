@@ -169,7 +169,7 @@ class TestBrainErrorHandling:
             # 调用 _llm_speak（在锁内），错误不应该传播
             try:
                 brain._llm_speak(mock_memory, pack=False)
-            except:
+            except Exception:
                 pass  # 异常已被内部捕获
 
             # 验证标志已重置（_llm_speak 不修改 _is_processing）

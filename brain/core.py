@@ -205,7 +205,8 @@ class Brain:
             # 将预检索的 context 传给 _llm_speak
             self._llm_speak(self.memory, pack=True, memories=dynamic_context)
         finally:
-            self._is_processing = False
+            with self.lock:
+                self._is_processing = False
 
     def _stream_with_tag_gate(self, stream_gen, chunk_count: int, max_chunks: int):
         """流式读取 LLM 输出，屏蔽 <tool> 标签及其后的本轮内容。"""
