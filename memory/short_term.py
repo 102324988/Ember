@@ -14,6 +14,8 @@ def separate_thought_and_speech(text):
     # 如果没有提取到 speech，返回原始文本
     if not speech:
         speech = text.strip()
+    from brain.tag_utils import remove_speech_tags
+    speech = remove_speech_tags(speech)
     return thought, speech
 
 

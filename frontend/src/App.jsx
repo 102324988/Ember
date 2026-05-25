@@ -500,6 +500,9 @@ function App() {
               // 剥除 LLM 自行添加的 <response> 标签（保留内容）
               displayContent = displayContent.replace(/<\/?response>/g, "").trim();
 
+              // 剥除 <speech> 标签（保留内容）
+              displayContent = displayContent.replace(/<speech[^>]*>/g, "").replace(/<\/speech>/g, "").trim();
+
               if (existingIndex !== -1) {
                 const newMessages = [...prev];
                 newMessages[existingIndex] = {

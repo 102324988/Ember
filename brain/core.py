@@ -265,7 +265,7 @@ class Brain:
                             visible_buffer.append(tag_buffer)
                         elif normalized_tag in ("<tool>", "</tool>"):
                             suppress_after_tool = True
-                        elif normalized_tag.startswith("<speech") or normalized_tag == "</speech>":
+                        elif normalized_tag.startswith("<speech") or normalized_tag.replace(" ", "").replace("\n", "") == "</speech>":
                             # <speech> 标签仅供 TTS 情感解析，不显示在前端
                             pass
                         else:
