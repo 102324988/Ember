@@ -9,7 +9,7 @@ from config.settings import settings
 from core.event_bus import EventBus, Event
 from brain.llm_client import LLMClient
 import threading
-from queue import Queue
+from queue import Empty, Queue
 from concurrent.futures import ThreadPoolExecutor
 from memory.db_pool import get_connection
 
@@ -85,7 +85,7 @@ class EpisodicMemory:
             try:
                 # 使用 timeout 支持中断
                 task = self.store_queue.get(timeout=1.0)
-            except:
+            except Empty:
                 # 超时检查是否应该退出
                 continue
 
@@ -102,7 +102,7 @@ class EpisodicMemory:
             finally:
                 try:
                     self.store_queue.task_done()
-                except:
+                except ValueError:
                     pass
 
     def _async_store_process(self, event_data):

@@ -37,6 +37,9 @@ class StateManager:
         self._thinking_lock = threading.Lock()  # 保护 is_thinking
         self._state_lock = threading.Lock()  # 保护 state.json 文件写入
         self._bg_lock = threading.Lock()  # 保护 _is_bg_processing
+        self._suspend_lock = threading.Lock()  # 保护 _suspend_count
+        self._suspend_count = 0  # 状态更新暂停计数器（>0 时禁止写入）
+        self._interrupt_idle = threading.Event()  # 用户输入中断空闲演化信号
         self._thinking = False
         self._is_bg_processing = False  # 后台总结互斥标志（不阻塞前端）
         self.is_sleeping = False
@@ -59,6 +62,23 @@ class StateManager:
     def is_thinking(self, value):
         with self._thinking_lock:
             self._thinking = value
+
+    @property
+    def _state_updates_suspended(self):
+        with self._suspend_lock:
+            return self._suspend_count > 0
+
+    def suspend_state_updates(self):
+        """暂停状态更新（存档加载等关键操作前调用）"""
+        with self._suspend_lock:
+            self._suspend_count += 1
+        logger.info("状态更新已暂停 (count=%d)", self._suspend_count)
+
+    def resume_state_updates(self):
+        """恢复状态更新"""
+        with self._suspend_lock:
+            self._suspend_count = max(0, self._suspend_count - 1)
+        logger.info("状态更新已恢复 (count=%d)", self._suspend_count)
 
     def _get_logical_now(self):
         return self.event_bus.logical_now
@@ -232,6 +252,11 @@ class StateManager:
         self._executor.submit(_log)
 
     def _update_state(self, new_state, logical_now=None):
+        # 存档加载等关键操作期间，禁止任何状态写入
+        if self._state_updates_suspended:
+            logger.warning("状态更新已暂停，丢弃本次更新")
+            return
+
         # 安全地复制并删除近期综合轨迹（用于日志记录），不影响原始数据
         log_data = new_state.copy()
         log_data.pop("近期综合轨迹", None)  # 使用 pop 避免 KeyError
@@ -256,6 +281,8 @@ class StateManager:
                 logger.error(f"状态文件写入失败: {e}")
 
     def _on_tick(self, event: Event):
+        if self._state_updates_suspended:
+            return
         # 使用 _is_bg_processing 作为重入保护，不再用 is_thinking
         # 这样后台总结不会阻塞前端输入
         with self._bg_lock:
@@ -271,7 +298,19 @@ class StateManager:
             self._update_state_due_to_idle(logical_now)
 
     def _on_llm_state_update(self, event: Event):
-        # 使用 _is_bg_processing 作为重入保护，不再阻塞前端
+        if self.is_thinking:
+            # 空闲演化正在运行，触发中断并等待其被中断后释放
+            self._interrupt_idle.set()
+            for _ in range(50):
+                if not self.is_thinking:
+                    break
+                time.sleep(0.1)
+            else:
+                logger.warning("等待空闲演化释放超时，放弃本次状态更新")
+                return
+        if self._state_updates_suspended:
+            return
+        # 使用 _is_bg_processing 作为重入保护，不再阻碍前端
         with self._bg_lock:
             if self._is_bg_processing:
                 return
@@ -332,6 +371,8 @@ class StateManager:
                 return
             self._is_bg_processing = True
 
+        self._interrupt_idle.clear()
+        self.is_thinking = True
         self.dialogue_count = 0  # 重置对话计数器
         logical_now_str = self._format_logical_time(logical_now)
         logger.info(f"[{logical_now_str}] 收到闲置事件，准备异步更新状态...")
@@ -362,6 +403,13 @@ class StateManager:
             response = self._ask_llm_with_tools(
                 settings.CORE_PERSONA, prompt, call_type="idle_evolve"
             )
+
+            # 检查是否被用户输入中断
+            if self._interrupt_idle.is_set():
+                self._interrupt_idle.clear()
+                logger.info("空闲演化被用户输入中断，丢弃结果")
+                return
+
             if response:
                 data = self.llm_client._extract_json(response)
                 if data is None:
@@ -409,6 +457,8 @@ class StateManager:
         except Exception as e:
             logger.error(f"闲置更新失败: {e}")
         finally:
+            self._interrupt_idle.clear()
+            self.is_thinking = False
             with self._bg_lock:
                 self._is_bg_processing = False
             self.last_interaction_logical_time = self._get_logical_now()

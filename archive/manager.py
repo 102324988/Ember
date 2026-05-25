@@ -654,8 +654,7 @@ class ArchiveManager:
             logger.debug("心跳已暂停")
 
         if self.state_manager:
-            # 锁定状态管理器
-            pass  # StateManager 需要添加 lock/unlock 方法
+            self.state_manager.suspend_state_updates()
 
     def _resume_system(self):
         """恢复系统组件"""
@@ -664,8 +663,7 @@ class ArchiveManager:
             logger.debug("心跳已恢复")
 
         if self.state_manager:
-            # 解锁状态管理器
-            pass
+            self.state_manager.resume_state_updates()
 
     def _reload_memory_state(self):
         """重建内存状态"""

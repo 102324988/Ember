@@ -24,6 +24,7 @@ class ShortTermMemory:
     def __init__(self, max_memory_size=20, base_prompt=None, state="initial"):
         self.max_memory_size = max_memory_size
         self.memory = []
+        self._memory_lock = threading.RLock()
         self.base_prompt = "你是一名助手"
         if base_prompt:
             self.base_prompt = base_prompt
@@ -75,26 +76,30 @@ class ShortTermMemory:
         self._executor.submit(_log)
 
     def add_message(self, role, content, timestamp=None):
-        if role == "assistant":
-            _, speech = separate_thought_and_speech(content)
-            self._add_back(role, speech, timestamp=timestamp)
-            self.async_log(
-                "./config/chat_history.log",
-                f"{role}: {speech}",
-            )
-        else:
-            self._add_back(role, content, timestamp=timestamp)
-            self.async_log(
-                "./config/chat_history.log",
-                f"{role}: {content}",
-            )
+        with self._memory_lock:
+            if role == "assistant":
+                _, speech = separate_thought_and_speech(content)
+                self._add_back(role, speech, timestamp=timestamp)
+                self.async_log(
+                    "./config/chat_history.log",
+                    f"{role}: {speech}",
+                )
+            else:
+                self._add_back(role, content, timestamp=timestamp)
+                self.async_log(
+                    "./config/chat_history.log",
+                    f"{role}: {content}",
+                )
         self._save_memory()
 
     def _save_memory(self):
+        with self._memory_lock:
+            snapshot = copy.deepcopy(self.memory)
+
         def _save():
             try:
                 with open("./config/chat_memory.json", "w", encoding="utf-8") as f:
-                    json.dump(self.memory, f, ensure_ascii=False, indent=4)
+                    json.dump(snapshot, f, ensure_ascii=False, indent=4)
             except Exception as e:
                 print(f"Error saving memory: {e}")
 
@@ -104,35 +109,37 @@ class ShortTermMemory:
         self.base_prompt = new_base_prompt
 
     def get_full_messages(self):
-        system_content = self.base_prompt
-        # 为每条消息附加时间戳前缀，让 LLM 感知对话的时间线
-        timestamped_memory = []
-        for msg in self.memory:
-            ts = msg.get("timestamp", "")
-            if ts:
-                # 从 "YYYY-MM-DD HH:MM:SS" 中提取 "MM-DD HH:MM"
-                try:
-                    short_ts = ts[5:16]  # "MM-DD HH:MM"
-                    content = f"[{short_ts}] {msg['content']}"
-                except Exception:
+        with self._memory_lock:
+            system_content = self.base_prompt
+            timestamped_memory = []
+            for msg in self.memory:
+                ts = msg.get("timestamp", "")
+                if ts:
+                    try:
+                        short_ts = ts[5:16]  # "MM-DD HH:MM"
+                        content = f"[{short_ts}] {msg['content']}"
+                    except Exception:
+                        content = msg["content"]
+                else:
                     content = msg["content"]
-            else:
-                content = msg["content"]
-            timestamped_memory.append({"role": msg["role"], "content": content})
+                timestamped_memory.append({"role": msg["role"], "content": content})
         return [
             {"role": "system", "content": system_content},
         ] + timestamped_memory
 
     def get_memory(self):
-        return {"history": copy.deepcopy(self.memory)}
+        with self._memory_lock:
+            return {"history": copy.deepcopy(self.memory)}
 
     def clear_memory(self):
-        self.memory = []
+        with self._memory_lock:
+            self.memory = []
         self._async_log_clear("./config/chat_history.log")
 
     def get_last_n_messages(self, n):
-        if n <= 0:
-            return []
-        if n >= len(self.memory):
-            return copy.deepcopy(self.memory)
-        return copy.deepcopy(self.memory[-n:])
+        with self._memory_lock:
+            if n <= 0:
+                return []
+            if n >= len(self.memory):
+                return copy.deepcopy(self.memory)
+            return copy.deepcopy(self.memory[-n:])

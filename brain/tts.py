@@ -144,12 +144,23 @@ class TTSManager:
 
         return final_chunks
 
+    @staticmethod
+    def remove_parenthesized_content(text: str) -> str:
+        """移除中英文括号及其内容（动作/表情描述，不适合 TTS 朗读）"""
+        # 中文全角括号 （...）
+        text = re.sub(r'（[^）]*）', '', text)
+        # 英文半角括号 (...)
+        text = re.sub(r'\([^)]*\)', '', text)
+        # 清理多余空白
+        return re.sub(r'\s{2,}', ' ', text).strip()
+
     async def generate_base64(self, text: str, timeout: float = 30.0, rate: str = "+0%", pitch: str = "+0Hz", volume: str = "+0%"):
         """合成语音并返回 Base64 编码，带超时保护和限速"""
         import base64
-        
+
         try:
             clean_text = remove_thought_content(text)
+            clean_text = self.remove_parenthesized_content(clean_text)
             if not clean_text.strip():
                 return None
                 
