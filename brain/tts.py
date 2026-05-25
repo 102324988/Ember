@@ -24,6 +24,36 @@ class RateLimiter:
                 await asyncio.sleep(wait_time)
             self._last_request_time = time.monotonic()
 
+def pad_to_acoustic(p: int = 5, a: int = 5, d: int = 5) -> dict:
+    """将 PAD 情感值映射为 Edge-TTS 声学参数（Rate/Pitch/Volume）
+    
+    映射依据心理声学理论：
+    - P (愉悦度) -> 音调 (Pitch)：开心时声音上扬，低落时音调低沉
+    - A (唤醒度) -> 语速 (Rate)：激动时语速加快，疲惫时语速放缓
+    - D (支配度) -> 音量 (Volume)：自信时音量增大，怯懦时音量减小
+    """
+    delta_p = max(1, min(10, p)) - 5
+    delta_a = max(1, min(10, a)) - 5
+    delta_d = max(1, min(10, d)) - 5
+
+    # Rate (语速): A 主导，P 轻微影响（开心时略快）
+    rate_pct = int(delta_a * 5 + delta_p * 1)
+    rate_pct = max(-30, min(30, rate_pct))  # 限幅 ±30%
+
+    # Pitch (音调): P 主导，A 辅助提升
+    pitch_hz = int(delta_p * 3 + delta_a * 1)
+    pitch_hz = max(-20, min(20, pitch_hz))  # 限幅 ±20Hz
+
+    # Volume (音量): D 主导，A 辅助
+    vol_pct = int(delta_d * 4 + delta_a * 2)
+    vol_pct = max(-25, min(25, vol_pct))  # 限幅 ±25%
+
+    return {
+        "rate": f"{rate_pct:+d}%",
+        "pitch": f"{pitch_hz:+d}Hz",
+        "volume": f"{vol_pct:+d}%",
+    }
+
 class TTSManager:
     def __init__(self, voice="zh-CN-XiaoxiaoNeural"):
         self.voice = voice
@@ -114,7 +144,7 @@ class TTSManager:
 
         return final_chunks
 
-    async def generate_base64(self, text: str, timeout: float = 30.0):
+    async def generate_base64(self, text: str, timeout: float = 30.0, rate: str = "+0%", pitch: str = "+0Hz", volume: str = "+0%"):
         """合成语音并返回 Base64 编码，带超时保护和限速"""
         import base64
         
@@ -123,7 +153,7 @@ class TTSManager:
             if not clean_text.strip():
                 return None
                 
-            audio_data = await self.generate_with_retry(clean_text, timeout=timeout)
+            audio_data = await self.generate_with_retry(clean_text, timeout=timeout, rate=rate, pitch=pitch, volume=volume)
             if audio_data:
                 return base64.b64encode(audio_data).decode('utf-8')
             return None
@@ -131,14 +161,14 @@ class TTSManager:
             logger.error(f"TTS base64 处理失败: {e}")
             return None
 
-    async def generate_with_retry(self, clean_text: str, timeout: float = 30.0, max_retries: int = 1) -> bytes | None:
+    async def generate_with_retry(self, clean_text: str, timeout: float = 30.0, max_retries: int = 1, rate: str = "+0%", pitch: str = "+0Hz", volume: str = "+0%") -> bytes | None:
         """带退避重试和等待频率限制的合成逻辑"""
         for attempt in range(max_retries + 1):
             await self.rate_limiter.wait_if_needed()
             try:
                 # 使用 asyncio.wait_for 包装 TTS 操作
                 audio_data = await asyncio.wait_for(
-                    self._do_tts(clean_text),
+                    self._do_tts(clean_text, rate=rate, pitch=pitch, volume=volume),
                     timeout=timeout
                 )
                 return audio_data
@@ -153,9 +183,12 @@ class TTSManager:
                 
         return None
 
-    async def _do_tts(self, clean_text: str):
-        """执行实际的 TTS 合成"""
-        communicate = edge_tts.Communicate(clean_text, self.voice)
+    async def _do_tts(self, clean_text: str, rate: str = "+0%", pitch: str = "+0Hz", volume: str = "+0%"):
+        """执行实际的 TTS 合成，支持动态语速/音调/音量"""
+        communicate = edge_tts.Communicate(
+            clean_text, self.voice,
+            rate=rate, pitch=pitch, volume=volume
+        )
         audio_data = b""
         async for chunk in communicate.stream():
             if chunk["type"] == "audio":

@@ -1,0 +1,2 @@
+brain\core.py:448:Event(name="user_interaction", data=self.memory.get_memory())
+persona\state_manager.py:48:self.event_bus.subscribe("user_interaction", self._on_llm_state_update)

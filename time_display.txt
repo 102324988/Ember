@@ -1,0 +1,5 @@
+55:  const [logicalTime, setLogicalTime] = useState("");
+56:  const [isThinking, setIsThinking] = useState(false);
+96:          setIsThinking(data.is_thinking || false);
+648:    // 不再因后台总结（is_thinking/is_summarizing）而阻塞用户输入
+840:          <div className="logic-clock-mini">当前时间: {logicalTime || "SYNCING..."}</div>

@@ -1,0 +1,117 @@
+main.py:9:from core.heartbeat import Heartbeat
+main.py:38:heartbeat = Heartbeat(event_bus, interval=settings.HEARTBEAT_INTERVAL)
+main.py:54:heartbeat.start()
+main.py:81:heartbeat.stop()
+server.py:27:from core.heartbeat import Heartbeat
+server.py:99:self.heartbeat = Heartbeat(self.event_bus, interval=settings.HEARTBEAT_INTERVAL)
+server.py:130:heartbeat=self.heartbeat,
+server.py:679:ping_interval = 30  # 30秒发送一次心跳
+server.py:683:# 检查是否需要发送心跳
+server.py:697:continue  # 超时继续循环，检查心跳
+server.py:702:# 处理心跳 pong
+server.py:865:self.heartbeat.start()
+archive\manager.py:62:heartbeat=None,
+archive\manager.py:74:heartbeat: 心跳实例 (可选)
+archive\manager.py:82:self.heartbeat = heartbeat
+archive\manager.py:652:if self.heartbeat:
+archive\manager.py:653:self.heartbeat.stop()
+archive\manager.py:654:logger.debug("心跳已暂停")
+archive\manager.py:662:if self.heartbeat:
+archive\manager.py:663:self.heartbeat.start()
+archive\manager.py:664:logger.debug("心跳已恢复")
+config\settings.py:46:HEARTBEAT_INTERVAL = int(os.getenv("HEARTBEAT_INTERVAL", "10"))
+core\heartbeat.py:9:class Heartbeat:
+core\heartbeat.py:19:"""启动心跳线程"""
+core\heartbeat.py:25:logger.debug("心跳线程已启动")
+core\heartbeat.py:28:"""停止心跳线程"""
+core\heartbeat.py:33:logger.debug("心跳线程已停止")
+core\heartbeat.py:36:"""暂停心跳（不停止线程）"""
+core\heartbeat.py:39:logger.debug("心跳已暂停")
+core\heartbeat.py:42:"""恢复心跳"""
+core\heartbeat.py:45:logger.debug("心跳已恢复")
+core\heartbeat.py:53:"""心跳循环，带异常保护防止线程崩溃"""
+core\heartbeat.py:72:logger.error(f"心跳 tick 异常 (连续 {consecutive_errors} 次): {e}")
+core\heartbeat.py:76:f"心跳连续失败 {max_consecutive_errors} 次，心跳线程退出"
+memory\entity_extraction.py:79:summaries = self._build_summaries(batch)
+memory\entity_extraction.py:82:result = self._extract_and_store(summaries)
+memory\entity_extraction.py:151:def _build_summaries(self, memories: list) -> str:
+memory\entity_extraction.py:153:summaries = []
+memory\entity_extraction.py:155:summary = f"[{i}] 时间: {m['time']}\n内容: {m['content']}"
+memory\entity_extraction.py:157:summary += f"\n感想: {m['insight']}"
+memory\entity_extraction.py:159:summary += f"\n关键词: {json.dumps(m['metadata'], ensure_ascii=False)}"
+memory\entity_extraction.py:160:summaries.append(summary)
+memory\entity_extraction.py:161:return "\n\n".join(summaries)
+memory\entity_extraction.py:163:def _extract_and_store(self, summaries: str) -> dict:
+memory\entity_extraction.py:167:summaries: 记忆摘要文本
+memory\entity_extraction.py:174:extraction_result = self._llm_extract(summaries)
+memory\entity_extraction.py:202:def _llm_extract(self, summaries: str) -> list:
+memory\entity_extraction.py:217:"content": f"请处理以下摘要，并按上述格式输出：\n\n{summaries}",
+tests\test_config.py:71:# HEARTBEAT_INTERVAL 默认 10
+tests\test_config.py:72:assert int(os.getenv("HEARTBEAT_INTERVAL", "10")) == 10
+tests\test_heartbeat.py:2:心跳机制测试
+tests\test_heartbeat.py:10:class TestHeartbeat:
+tests\test_heartbeat.py:11:"""测试心跳时钟"""
+tests\test_heartbeat.py:13:def test_heartbeat_initialization(self):
+tests\test_heartbeat.py:14:"""测试心跳初始化"""
+tests\test_heartbeat.py:15:from core.heartbeat import Heartbeat
+tests\test_heartbeat.py:21:heartbeat = Heartbeat(event_bus, interval)
+tests\test_heartbeat.py:23:assert heartbeat.event_bus == event_bus
+tests\test_heartbeat.py:24:assert heartbeat.interval == interval
+tests\test_heartbeat.py:25:assert heartbeat._thread is None
+tests\test_heartbeat.py:26:assert heartbeat._stop_event is not None
+tests\test_heartbeat.py:28:def test_heartbeat_starts_and_stops(self):
+tests\test_heartbeat.py:29:"""测试心跳启动和停止"""
+tests\test_heartbeat.py:30:from core.heartbeat import Heartbeat
+tests\test_heartbeat.py:34:heartbeat = Heartbeat(event_bus, 0.1)  # 100ms间隔
+tests\test_heartbeat.py:36:# 启动心跳
+tests\test_heartbeat.py:37:heartbeat.start()
+tests\test_heartbeat.py:38:assert heartbeat._thread is not None
+tests\test_heartbeat.py:39:assert heartbeat._thread.is_alive()
+tests\test_heartbeat.py:41:# 停止心跳
+tests\test_heartbeat.py:42:heartbeat.stop()
+tests\test_heartbeat.py:43:assert not heartbeat._thread.is_alive()
+tests\test_heartbeat.py:45:def test_heartbeat_publishes_events(self):
+tests\test_heartbeat.py:46:"""测试心跳发布事件"""
+tests\test_heartbeat.py:47:from core.heartbeat import Heartbeat
+tests\test_heartbeat.py:59:heartbeat = Heartbeat(event_bus, 0.05)  # 50ms间隔
+tests\test_heartbeat.py:62:heartbeat.start()
+tests\test_heartbeat.py:64:heartbeat.stop()
+tests\test_heartbeat.py:69:def test_heartbeat_in_thread(self):
+tests\test_heartbeat.py:70:"""测试心跳在独立线程运行"""
+tests\test_heartbeat.py:71:from core.heartbeat import Heartbeat
+tests\test_heartbeat.py:76:heartbeat = Heartbeat(event_bus, 0.1)
+tests\test_heartbeat.py:78:heartbeat.start()
+tests\test_heartbeat.py:81:# 心跳应该在不同线程
+tests\test_heartbeat.py:82:assert heartbeat._thread != main_thread
+tests\test_heartbeat.py:83:assert heartbeat._thread.is_alive()
+tests\test_heartbeat.py:85:heartbeat.stop()
+tests\test_heartbeat.py:89:from core.heartbeat import Heartbeat
+tests\test_heartbeat.py:93:heartbeat = Heartbeat(event_bus, 0.1)
+tests\test_heartbeat.py:95:heartbeat.start()
+tests\test_heartbeat.py:96:first_thread = heartbeat._thread
+tests\test_heartbeat.py:99:heartbeat.start()
+tests\test_heartbeat.py:100:second_thread = heartbeat._thread
+tests\test_heartbeat.py:104:heartbeat.stop()
+tests\test_heartbeat.py:108:from core.heartbeat import Heartbeat
+tests\test_heartbeat.py:112:heartbeat = Heartbeat(event_bus, 0.1)
+tests\test_heartbeat.py:115:heartbeat.stop()
+tests\test_heartbeat.py:116:assert heartbeat._thread is None or not heartbeat._thread.is_alive()
+tools\base.py:255:def summarize_result(self, result: ToolResult, max_length: int = 200) -> str:
+tools\base.py:283:if k in ('message', 'content', 'text', 'summary', 'result'):
+tools\plugin.py:379:def summarize_result(self, result: ToolResult, max_length: int = 200) -> str:
+tools\processor.py:243:summary = tool.summarize_result(result, max_length=200)
+tools\processor.py:244:lines.append(f"- {tool_name}: {summary}")
+tools\builtin\memory_query_tool.py:127:def summarize_result(self, result: ToolResult, max_length: int = 200) -> str:
+tools\builtin\memory_query_tool.py:165:summary = "".join(parts)
+tools\builtin\memory_query_tool.py:166:return summary[:max_length] if len(summary) > max_length else summary
+tools\builtin\web_search_tool.py:78:def summarize_result(self, result: ToolResult, max_length: int = 500) -> str:
+tools\plugins\test_tool.py:59:def summarize_result(self, result: ToolResult, max_length: int = 200) -> str:
+utils\benchmark_runner.py:144:from core.heartbeat import Heartbeat
+utils\benchmark_runner.py:156:heartbeat = Heartbeat(event_bus, interval=settings.HEARTBEAT_INTERVAL)
+utils\benchmark_runner.py:167:heartbeat.start()
+utils\benchmark_runner.py:171:"heartbeat": heartbeat,
+utils\benchmark_runner.py:591:def print_summary_table(a_results: list, b_results: list):
+utils\benchmark_runner.py:717:stress_modules["heartbeat"].stop()
+utils\benchmark_runner.py:721:# ── 停止心跳 ──
+utils\benchmark_runner.py:723:modules["heartbeat"].stop()
+utils\benchmark_runner.py:729:print_summary_table(a_results, b_results)

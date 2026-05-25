@@ -1,0 +1,4 @@
+56:  const [isThinking, setIsThinking] = useState(false);
+95:          setIsThinking(data.is_thinking || false);
+650:      if (configData.is_thinking) {
+657:      if (isThinking) {

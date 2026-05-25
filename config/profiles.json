@@ -7,8 +7,8 @@
       "model_path": "/models/yachiyo/八千代辉夜姬.model3.json",
       "display": {
         "scale": 0.86,
-        "offset_x": -299,
-        "offset_y": 6,
+        "offset_x": 409,
+        "offset_y": 66,
         "anchor": {
           "x": 0.5,
           "y": 0.5
