@@ -1,4 +1,0 @@
-frontend/src/App.jsx:56:const [isThinking, setIsThinking] = useState(false);
-frontend/src/App.jsx:95:setIsThinking(data.is_thinking || false);
-frontend/src/App.jsx:650:if (configData.is_thinking) {
-frontend/src/App.jsx:657:if (isThinking) {

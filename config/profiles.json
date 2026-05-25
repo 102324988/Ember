@@ -22,8 +22,8 @@
       "model_path": "/models/LSS/LSS.model3.json",
       "display": {
         "scale": 0.33,
-        "offset_x": -306,
-        "offset_y": -292,
+        "offset_x": 374,
+        "offset_y": 112,
         "anchor": {
           "x": 0.5,
           "y": 0.5

@@ -1,4 +1,0 @@
-core\heartbeat.py:67:tick_event = Event(name="system.tick", data={"timestamp": time.time()})
-persona\state_manager.py:49:self.event_bus.subscribe("system.tick", self._on_tick)
-tests\test_heartbeat.py:54:if event.name == "system.tick":
-tests\test_heartbeat.py:57:event_bus.subscribe("system.tick", capture_event)
