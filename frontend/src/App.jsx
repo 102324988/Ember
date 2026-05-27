@@ -54,6 +54,7 @@ function App() {
   const [showThought, setShowThought] = useState(false);
   const [logicalTime, setLogicalTime] = useState("");
   const [isThinking, setIsThinking] = useState(false);
+  const [isSummarizing, setIsSummarizing] = useState(false);
   const [toastMessage, setToastMessage] = useState("");
   const [showTimeline, setShowTimeline] = useState(false);
   const [showArchive, setShowArchive] = useState(false);
@@ -93,6 +94,7 @@ function App() {
         .then(data => {
           if (data.logical_time) setLogicalTime(data.logical_time);
           setIsThinking(data.is_thinking || false);
+          setIsSummarizing(data.is_summarizing || false);
         })
         .catch(() => { });
     };
@@ -498,6 +500,9 @@ function App() {
               // 剥除 LLM 自行添加的 <response> 标签（保留内容）
               displayContent = displayContent.replace(/<\/?response>/g, "").trim();
 
+              // 剥除 <speech> 标签（保留内容）
+              displayContent = displayContent.replace(/<speech[^>]*>/g, "").replace(/<\/speech>/g, "").trim();
+
               if (existingIndex !== -1) {
                 const newMessages = [...prev];
                 newMessages[existingIndex] = {
@@ -643,23 +648,8 @@ function App() {
   };
 
   const handleSend = async () => {
-    // 立即请求最新状态，判断是否正在思考
-    try {
-      const configRes = await fetch("http://localhost:8000/config");
-      const configData = await configRes.json();
-      if (configData.is_thinking) {
-        setToastMessage("依鸣正在思考中，请稍候...");
-        setTimeout(() => setToastMessage(""), 2000);
-        return;
-      }
-    } catch (e) {
-      // 网络错误时降级使用本地状态
-      if (isThinking) {
-        setToastMessage("依鸣正在思考中，请稍候...");
-        setTimeout(() => setToastMessage(""), 2000);
-        return;
-      }
-    }
+    // 不再因后台总结（is_thinking/is_summarizing）而阻塞用户输入
+    // 用户随时可以发送消息，后台总结会在线程池中异步完成
 
     if (currentAudio) {
       currentAudio.pause();
@@ -850,7 +840,7 @@ function App() {
       {/* 状态面板 - 放置在右上方 */}
       <div className="status-overlay">
         <div className="status-header">
-          <div className="logic-clock-mini">当前时间: {logicalTime || "SYNCING..."}</div>
+          <div className="logic-clock-mini">当前时间: {logicalTime || "SYNCING..."}{isSummarizing && <span className="summarizing-dot" title="后台整理记忆中...">●</span>}</div>
         </div>
         <div className="status-radar">
           <ResponsiveContainer width="100%" height="100%">

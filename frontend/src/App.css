@@ -1179,3 +1179,19 @@ button:hover {
 .autoplay-toggle.active:hover {
   background: #73d13d;
 }
+
+/* 后台总结指示器 - 非侵入式的脉冲小圆点 */
+.summarizing-dot {
+  display: inline-block;
+  margin-left: 8px;
+  color: #f0a030;
+  font-size: 10px;
+  animation: summarize-pulse 1.5s ease-in-out infinite;
+  vertical-align: middle;
+  cursor: help;
+}
+
+@keyframes summarize-pulse {
+  0%, 100% { opacity: 0.3; }
+  50% { opacity: 1; }
+}

@@ -36,10 +36,12 @@ class StateManager:
         self.current_state = settings.STATE
         self._thinking_lock = threading.Lock()  # 保护 is_thinking
         self._state_lock = threading.Lock()  # 保护 state.json 文件写入
+        self._bg_lock = threading.Lock()  # 保护 _is_bg_processing
         self._suspend_lock = threading.Lock()  # 保护 _suspend_count
         self._suspend_count = 0  # 状态更新暂停计数器（>0 时禁止写入）
         self._interrupt_idle = threading.Event()  # 用户输入中断空闲演化信号
         self._thinking = False
+        self._is_bg_processing = False  # 后台总结互斥标志（不阻塞前端）
         self.is_sleeping = False
         self.dialogue_count = 0
 
@@ -279,10 +281,13 @@ class StateManager:
                 logger.error(f"状态文件写入失败: {e}")
 
     def _on_tick(self, event: Event):
-        if self.is_thinking:
-            return
         if self._state_updates_suspended:
             return
+        # 使用 _is_bg_processing 作为重入保护，不再用 is_thinking
+        # 这样后台总结不会阻塞前端输入
+        with self._bg_lock:
+            if self._is_bg_processing:
+                return
 
         logical_now = self._get_logical_now()
         logical_elapsed = logical_now - self.last_interaction_logical_time
@@ -294,8 +299,8 @@ class StateManager:
 
     def _on_llm_state_update(self, event: Event):
         if self.is_thinking:
-            # 空闲演化正在运行，等待其被中断后释放
-            # _on_user_input 已经设置了 _interrupt_idle，空闲演化会快速中止
+            # 空闲演化正在运行，触发中断并等待其被中断后释放
+            self._interrupt_idle.set()
             for _ in range(50):
                 if not self.is_thinking:
                     break
@@ -305,6 +310,10 @@ class StateManager:
                 return
         if self._state_updates_suspended:
             return
+        # 使用 _is_bg_processing 作为重入保护，不再阻碍前端
+        with self._bg_lock:
+            if self._is_bg_processing:
+                return
         self.dialogue_count += 1
         if self.dialogue_count % settings.STATE_UPDATE_INTERVAL != 0:
             logger.info(
@@ -312,12 +321,23 @@ class StateManager:
             )
             return
         self.state_update_timeout = settings.STATE_IDLE_MIN_TIMEOUT
-        self.is_thinking = True
+
+        # 设置后台处理标志（不影响 is_thinking）
+        with self._bg_lock:
+            self._is_bg_processing = True
+
         history = event.data.get("history", [])
         logical_now = self._get_logical_now()
         logical_now_str = self._format_logical_time(logical_now)
-        logger.info(f"[{logical_now_str}] 收到用户交互事件，准备更新状态...")
+        logger.info(f"[{logical_now_str}] 收到用户交互事件，准备异步更新状态...")
 
+        # 将重量级 LLM 调用提交到线程池异步执行，不阻塞当前线程
+        self._executor.submit(
+            self._do_llm_state_update, history, logical_now, logical_now_str
+        )
+
+    def _do_llm_state_update(self, history, logical_now, logical_now_str):
+        """在线程池中执行的对话后状态更新（不阻塞主流程）"""
         prompt = f"当前的准确时间: {logical_now_str}\n\n[先前状态]\n{json.dumps(self.current_state, ensure_ascii=False)}\n\n[近期对话记录]:\n{json.dumps(history, ensure_ascii=False)}\n\n{settings.STATE_UPDATE_PROMPT}"
 
         try:
@@ -340,20 +360,33 @@ class StateManager:
         except Exception as e:
             logger.error(f"对话更新失败: {e}")
         finally:
-            self.is_thinking = False
+            with self._bg_lock:
+                self._is_bg_processing = False
             self.last_interaction_logical_time = self._get_logical_now()
 
     def _update_state_due_to_idle(self, logical_now):
+        # 设置后台处理标志（不影响 is_thinking）
+        with self._bg_lock:
+            if self._is_bg_processing:
+                return
+            self._is_bg_processing = True
+
         self._interrupt_idle.clear()
         self.is_thinking = True
         self.dialogue_count = 0  # 重置对话计数器
         logical_now_str = self._format_logical_time(logical_now)
-        logger.info(f"[{logical_now_str}] 收到闲置事件，准备更新状态...")
+        logger.info(f"[{logical_now_str}] 收到闲置事件，准备异步更新状态...")
 
         info = self._get_idle_info(logical_now)
-
         history = self.short_term_memory.get_memory().get("history", [])
 
+        # 将重量级 LLM 调用提交到线程池异步执行
+        self._executor.submit(
+            self._do_idle_state_update, info, history, logical_now, logical_now_str
+        )
+
+    def _do_idle_state_update(self, info, history, logical_now, logical_now_str):
+        """在线程池中执行的闲置状态演化（不阻塞心跳线程）"""
         # 不再直接调用 hippocampus.load_memory，改为让 LLM 通过工具主动获取记忆
         # 这样与对话系统的记忆加载方式保持一致
 
@@ -426,6 +459,8 @@ class StateManager:
         finally:
             self._interrupt_idle.clear()
             self.is_thinking = False
+            with self._bg_lock:
+                self._is_bg_processing = False
             self.last_interaction_logical_time = self._get_logical_now()
 
     @property

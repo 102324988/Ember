@@ -28,6 +28,7 @@ from core.heartbeat import Heartbeat
 from persona.state_manager import StateManager
 from brain.core import Brain
 from brain.tts import TTSManager
+from brain.tts import pad_to_acoustic
 from memory.short_term import ShortTermMemory
 from config.settings import settings
 from memory.episodic_memory import EpisodicMemory
@@ -392,6 +393,7 @@ class EmberServer:
                 "state": self.state_manager.current_state,
                 "logical_time": self.event_bus.formatted_logical_now,
                 "is_thinking": self.state_manager.is_thinking,
+                "is_summarizing": self.state_manager._is_bg_processing,
                 "time_accel_factor": self.event_bus.time_accel_factor,
                 "live2d": {
                     "profile_id": current_profile.get("id"),
@@ -775,71 +777,92 @@ class EmberServer:
             )
 
     def _on_ai_finished_internal(self, event):
+        # 使用 llm.finished 事件中的完整文本（包含 <speech> 标签）用于 TTS
+        full_text_with_tags = event.data.get("text", "")
         logger.info(
-            f"LLM 完成输出，准备合成 TTS... (内容长度: {len(self.current_full_text)})"
+            f"LLM 完成输出，准备合成 TTS... (内容长度: {len(full_text_with_tags)})"
         )
-        if self.current_full_text and self.current_full_text.strip():
+        if full_text_with_tags and full_text_with_tags.strip():
             # 只有开启了某种自动逻辑或当前处于 AI 回复流中才自动合成
             if self.loop:
                 self.loop.call_soon_threadsafe(
                     lambda: asyncio.create_task(
-                        self._process_tts(self.current_full_text)
+                        self._process_tts(full_text_with_tags)
                     )
                 )
 
         self.safe_broadcast({"type": "llm.done"})
 
     async def _process_tts(self, text):
-        """处理 TTS，采用智能分段、顺序生成以避免多次建连限流，同时降低首段延迟"""
+        """处理 TTS：解析 <speech> 标签获取即时 PAD 情感，映射为声学参数"""
         if not text or not text.strip():
             return
 
-        # 前置处理：移除所有的 <thought>...</thought> 思考过程，防止把内部计划读出声
-        from brain.tag_utils import remove_thought_content
+        # 前置处理：移除 <thought>...</thought> 思考过程
+        from brain.tag_utils import remove_thought_content, parse_speech_segments
         clean_text = remove_thought_content(text)
-        
+
         if not clean_text or not clean_text.strip():
             return
 
         # 使用信号量防止不同轮次的回复同时发起 TTS 请求（严格串行）
         async with self._tts_semaphore:
             try:
-                # 句子智能切割
-                sentences = self.tts_manager.split_sentences(clean_text)
-                
-                total_chunks = len(sentences)
+                # 解析 <speech> 标签，获取带有即时 PAD 情感的分段
+                speech_segments = parse_speech_segments(clean_text)
+
+                if not speech_segments:
+                    return
+
+                # 对每个 speech 分段再做句子切割
+                all_chunks = []  # [(sentence_text, acoustic_params), ...]
+                for seg in speech_segments:
+                    acoustic = pad_to_acoustic(seg["p"], seg["a"], seg["d"])
+                    sentences = self.tts_manager.split_sentences(seg["text"])
+                    for sentence in sentences:
+                        all_chunks.append((sentence, acoustic))
+
+                total_chunks = len(all_chunks)
                 if total_chunks == 0:
                     return
-                    
-                logger.info(f"TTS 文本切割完毕，总段数: {total_chunks}")
 
-                for index, sentence in enumerate(sentences):
+                logger.info(f"TTS 情感分段切割完毕，总段数: {total_chunks}")
+
+                for index, (sentence, acoustic) in enumerate(all_chunks):
                     # 避免极端情况长文本（兜底保护）
                     max_tts_length = 500
                     if len(sentence) > max_tts_length:
                         sentence = sentence[:max_tts_length] + "..."
                         logger.warning(f"TTS 单句文本过长，已截断至 {max_tts_length} 字符")
 
-                    base64_audio = await self.tts_manager.generate_base64(sentence)
-                    
+                    base64_audio = await self.tts_manager.generate_base64(
+                        sentence,
+                        rate=acoustic["rate"],
+                        pitch=acoustic["pitch"],
+                        volume=acoustic["volume"],
+                    )
+
                     if base64_audio:
-                        logger.info(f"广播 Base64 TTS 音频 chunk [{index+1}/{total_chunks}] (长度: {len(base64_audio)})")
+                        logger.info(
+                            f"广播 TTS chunk [{index+1}/{total_chunks}] "
+                            f"(PAD: rate={acoustic['rate']}, pitch={acoustic['pitch']}, vol={acoustic['volume']})"
+                        )
                         await self.manager.broadcast(
                             {
-                                "type": "audio_chunk", 
+                                "type": "audio_chunk",
                                 "index": index,
                                 "total": total_chunks,
-                                "audio_base64": base64_audio
+                                "audio_base64": base64_audio,
                             }
                         )
                     else:
                         logger.warning(f"TTS chunk [{index+1}/{total_chunks}] 合成失败，发送空段保持队列继续")
                         await self.manager.broadcast(
                             {
-                                "type": "audio_chunk", 
+                                "type": "audio_chunk",
                                 "index": index,
                                 "total": total_chunks,
-                                "audio_base64": None
+                                "audio_base64": None,
                             }
                         )
 
