@@ -49,7 +49,7 @@ const Live2DViewer = ({ currentEmotion, audio, modelPath, modelDisplay, adjustMo
     const dragRef = useRef(null);
     const modelDisplayRef = useRef(modelDisplay);
     const [modelLoaded, setModelLoaded] = useState(false);
-    
+
     // Refs for touch logic
     const onTouchRef = useRef(onTouch);
     const lastTouchTimeRef = useRef(0);
@@ -288,7 +288,7 @@ const Live2DViewer = ({ currentEmotion, audio, modelPath, modelDisplay, adjustMo
                     : targetPath;
                 console.log("Loading Live2D model:", { url: targetPath, publicPath });
                 const model = await Live2DModel.from(targetPath, {
-                    autoInteract: false
+                    autoInteract: true
                 });
 
                 if (!appRef.current || appRef.current !== app) {
@@ -298,6 +298,17 @@ const Live2DViewer = ({ currentEmotion, audio, modelPath, modelDisplay, adjustMo
 
                 modelRef.current = model;
                 app.stage.addChild(model);
+
+                // 默认尝试开始 Idle 动作
+                try {
+                    model.motion('Idle');
+                } catch (e) {
+                    try {
+                        model.motion('idle');
+                    } catch (e2) {
+                        console.log("No default idle motion found");
+                    }
+                }
 
                 const latestViewport = getViewportSize();
                 app.renderer.resize(latestViewport.width, latestViewport.height);

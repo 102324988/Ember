@@ -256,6 +256,13 @@ function App() {
     }
   };
 
+  const handleArchiveLoaded = async () => {
+    setMessages([]);
+    setHasMore(true);
+    await refreshConfig();
+    await loadHistory();
+  };
+
   // 获取后端角色配置
   useEffect(() => {
     refreshConfig();
@@ -353,17 +360,17 @@ function App() {
     }
   };
 
-  // 监听消息更新自动滚到底部（仅限新消息进入时）
+  // 监听消息更新自动滚到底部
   useEffect(() => {
-    // 如果正在加载历史，不滚动
+    // 如果正在加载历史记录，则不自动滚动
     if (isLoadingHistory) return;
-    // 如果用户手动滚动过，不自动滚动
-    if (userHasScrolled.current) return;
-    // 只有明确标记应该滚动时才滚动
-    if (!shouldAutoScroll.current) return;
-    // 滚动到底部后重置标记
-    scrollToBottom();
-    shouldAutoScroll.current = false;
+
+    // 如果用户就在底部附近，或者我们明确需要强行滚动（如用户刚发了消息）
+    // 逻辑：只要用户没在翻阅历史，就保持在最下方
+    if (!userHasScrolled.current || shouldAutoScroll.current) {
+      scrollToBottom();
+      shouldAutoScroll.current = false;
+    }
   }, [messages, isLoadingHistory]);
 
   // 播放音频队列
@@ -378,6 +385,9 @@ function App() {
       // 【音画同步】在播放开始前同步显示文本和表情
       if (audioObj.text) {
         const messageId = audioObj.id || Date.now();
+        if (!userHasScrolled.current) {
+          shouldAutoScroll.current = true;
+        }
         setMessages(prev => {
           const existingIndex = prev.findIndex(m => m.id === messageId && m.role === 'ai');
           if (existingIndex !== -1) {
@@ -443,6 +453,7 @@ function App() {
 
       ws.current.onopen = () => {
         console.log("WebSocket 连接已打开");
+        if (!userHasScrolled.current) shouldAutoScroll.current = true;
         setMessages(prev => [...prev.filter(m => m.id !== 'ws-status'), { role: "system", content: "WebSocket 连接已建立", id: 'ws-status' }]);
       };
 
@@ -452,7 +463,10 @@ function App() {
           console.log("收到 WebSocket 数据对象:", data);
 
           if (data.type === 'message') {
-            // ... (保持不变)
+            // 如果用户就在底部附近，标记为自动滚动，防止新内容把用户“顶”上去导致停止同步
+            if (!userHasScrolled.current) {
+              shouldAutoScroll.current = true;
+            }
             const messageId = data.id || Date.now();
             setMessages(prev => {
               const mappedRole = (data.sender === 'ai' || data.sender === 'assistant' || data.sender === 'bot') ? 'ai' : 'user';
@@ -595,6 +609,7 @@ function App() {
 
       ws.current.onclose = (e) => {
         console.log("WebSocket 连接已关闭", e.reason);
+        if (!userHasScrolled.current) shouldAutoScroll.current = true;
         setMessages(prev => [...prev.filter(m => m.id !== 'ws-status'), { role: "system", content: "WebSocket 连接断开，尝试重连中...", id: 'ws-status' }]);
         // 5秒后尝试重连
         setTimeout(connectWS, 5000);
@@ -708,6 +723,7 @@ function App() {
               content: base64String,
               time: new Date().toISOString()
             }));
+            if (!userHasScrolled.current) shouldAutoScroll.current = true;
             setMessages(prev => [...prev, { role: "system", content: "[语音消息已发送]" }]);
           }
         };
@@ -752,7 +768,7 @@ function App() {
     }
   };
 
-  const appStyle = currentState["背景图Url"] ? { 
+  const appStyle = currentState["背景图Url"] ? {
     backgroundImage: `url(${currentState["背景图Url"]})`,
     backgroundSize: 'cover',
     backgroundPosition: 'center',
@@ -828,6 +844,7 @@ function App() {
       <ArchiveModal
         isOpen={showArchive}
         onClose={() => setShowArchive(false)}
+        onArchiveLoaded={handleArchiveLoaded}
       />
 
       <ProfileModal

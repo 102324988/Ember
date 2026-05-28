@@ -3,7 +3,7 @@ import './ArchiveModal.css';
 
 const API_BASE = 'http://localhost:8000/api/archive';
 
-function ArchiveModal({ isOpen, onClose }) {
+function ArchiveModal({ isOpen, onClose, onArchiveLoaded }) {
     const [archives, setArchives] = useState([]);
     const [loading, setLoading] = useState(false);
     const [operation, setOperation] = useState(null); // 'saving' | 'loading' | 'deleting'
@@ -127,8 +127,12 @@ function ArchiveModal({ isOpen, onClose }) {
                 setTimeout(() => {
                     setOperation(null);
                     onClose();
-                    // 刷新页面以应用新状态
-                    window.location.reload();
+                    // 刷新状态而不重新加载页面
+                    if (onArchiveLoaded) {
+                        onArchiveLoaded();
+                    } else {
+                        window.location.reload();
+                    }
                 }, 1500);
             } else {
                 setError(data.error || '加载失败');
@@ -212,7 +216,11 @@ function ArchiveModal({ isOpen, onClose }) {
                 setTimeout(() => {
                     setOperation(null);
                     onClose();
-                    window.location.reload();
+                    if (onArchiveLoaded) {
+                        onArchiveLoaded();
+                    } else {
+                        window.location.reload();
+                    }
                 }, 1500);
             } else {
                 setError(data.error || '快速读档失败');

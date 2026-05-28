@@ -78,7 +78,8 @@ def remove_thought_content(text: str) -> str:
     text = re.sub(r'\n\s*\n\s*\n', '\n\n', text)
     text = text.strip()
     
-    return text
+    # 如果剥离后内容为空，至少用空格占位
+    return text if text else " "
 
 
 def extract_thought_and_speech(text: str) -> tuple[str, str]:
@@ -100,6 +101,8 @@ def extract_thought_and_speech(text: str) -> tuple[str, str]:
     # 提取 thought 内容
     thought_match = re.search(r'<thought>([\s\S]*?)</thought>', text)
     thought = thought_match.group(1).strip() if thought_match else ""
+    if not thought:
+        thought = " "
     
     # 提取 speech 内容（移除 thought 部分）
     speech = remove_thought_content(text)
@@ -140,7 +143,8 @@ def validate_and_fix_llm_output(text: str) -> str:
     # 确保不会有多余的空行
     text = re.sub(r'\n{3,}', '\n\n', text)
 
-    return text.strip()
+    text = text.strip()
+    return text if text else " "
 
 
 def parse_speech_segments(text: str) -> list[dict]:
@@ -216,16 +220,18 @@ def remove_speech_tags(text: str) -> str:
     if not text:
         return text
 
+    # 更加健壮的正则表达式，处理大小写、额外空格和换行
     # 移除开启标签 <speech ...>
-    text = re.sub(r'<speech[^>]*>', '', text)
+    text = re.sub(r'<\s*speech[^>]*>', '', text, flags=re.IGNORECASE | re.DOTALL)
     # 移除闭合标签 </speech>
-    text = re.sub(r'</speech>', '', text)
+    text = re.sub(r'<\s*/\s*speech\s*>', '', text, flags=re.IGNORECASE)
 
     # 清理多余的空行
     text = re.sub(r'\n\s*\n\s*\n', '\n\n', text)
     text = text.strip()
 
-    return text
+    # 如果剥离后内容为空，至少用空格占位
+    return text if text else " "
 
 
 def fix_speech_tags(text: str) -> str:

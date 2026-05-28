@@ -327,13 +327,22 @@ class StateManager:
             self._is_bg_processing = True
 
         history = event.data.get("history", [])
+        # 预处理历史记录：明确角色标识，防止 LLM 混淆
+        processed_history = []
+        for msg in history:
+            role_name = "对方" if msg["role"] == "user" else "依鸣(你自己)"
+            processed_history.append({
+                "role": msg["role"],
+                "content": f"{role_name}: {msg['content']}"
+            })
+
         logical_now = self._get_logical_now()
         logical_now_str = self._format_logical_time(logical_now)
         logger.info(f"[{logical_now_str}] 收到用户交互事件，准备异步更新状态...")
 
         # 将重量级 LLM 调用提交到线程池异步执行，不阻塞当前线程
         self._executor.submit(
-            self._do_llm_state_update, history, logical_now, logical_now_str
+            self._do_llm_state_update, processed_history, logical_now, logical_now_str
         )
 
     def _do_llm_state_update(self, history, logical_now, logical_now_str):

@@ -8,6 +8,7 @@ import json
 from config.settings import settings
 from core.event_bus import EventBus, Event
 from brain.llm_client import LLMClient
+from brain.tag_utils import remove_speech_tags
 import threading
 from queue import Empty, Queue
 from concurrent.futures import ThreadPoolExecutor
@@ -106,8 +107,12 @@ class EpisodicMemory:
                     pass
 
     def _async_store_process(self, event_data):
-        content = event_data.get("content", "")
-        insight = event_data.get("insight", "")
+        content = remove_speech_tags(event_data.get("content", ""))
+        insight = remove_speech_tags(event_data.get("insight", ""))
+
+        # 将清理后的纯文本写回 event_data，确保入库内容也是纯文本
+        event_data["content"] = content
+        event_data["insight"] = insight
 
         try:
             embedding = self.llm_client.get_embedding(settings.EMBEDDING_MODEL, content)

@@ -8,7 +8,7 @@ import threading
 import re
 from queue import Queue
 from concurrent.futures import ThreadPoolExecutor
-from brain.tag_utils import extract_thought_and_speech
+from brain.tag_utils import extract_thought_and_speech, remove_speech_tags
 from memory.db_pool import get_connection
 
 logger = logging.getLogger(__name__)
@@ -20,6 +20,8 @@ def separate_thought_and_speech(text):
     # 如果没有提取到 speech，返回原始文本
     if not speech:
         speech = text.strip()
+    # 移除 <speech> 标签，只保留纯文本内容
+    speech = remove_speech_tags(speech)
     return thought, speech
 
 

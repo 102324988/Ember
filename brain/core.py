@@ -140,13 +140,12 @@ class Brain:
                             situation = state.get("客观情境", "")
 
                             prompt = (
-                                f"日式动漫风格场景插画，第一人称视角，二次元，masterpiece，动漫风格,clean line art,soft colors,线条简约,细线条，阴影简约，"
-                                f"场景: {new_location}。"
-                                f"画面中心是伊蕾娜一个人，魔女之旅伊蕾娜，身高中等，银发，紫色瞳孔,侧马尾，二次元画风"
-                                f"着装符合魔女之旅伊蕾娜的日常穿搭。"
-                                f"她正在{new_action}，{pad_mood},二次元，"
-                                f"背景细节: {situation[:80] if situation else new_location}，"
-                                f"氛围自然，符合动漫美学，二次元"
+                                f"High-quality anime background for a visual novel, style of Makoto Shinkai, "
+                                f"scenery porn, vibrant colors, cinematic lighting, masterpiece, 2D art. "
+                                f"Location: {new_location}. "
+                                f"Environment details: {situation[:80] if situation else new_location}. "
+                                f"Atmosphere: soft focus, atmospheric glow, high contrast between light and shadow. "
+                                f"NO characters, background only, wide angle."
                             )
                             bg_url = self.llm_client.generate_image(prompt)
                             if bg_url:

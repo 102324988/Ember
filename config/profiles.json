@@ -6,9 +6,9 @@
       "name": "八千代辉夜姬",
       "model_path": "/models/yachiyo/八千代辉夜姬.model3.json",
       "display": {
-        "scale": 0.86,
-        "offset_x": 409,
-        "offset_y": 66,
+        "scale": 0.26,
+        "offset_x": -252,
+        "offset_y": -233,
         "anchor": {
           "x": 0.5,
           "y": 0.5
@@ -22,8 +22,8 @@
       "model_path": "/models/LSS/LSS.model3.json",
       "display": {
         "scale": 0.33,
-        "offset_x": 374,
-        "offset_y": 112,
+        "offset_x": -248,
+        "offset_y": -248,
         "anchor": {
           "x": 0.5,
           "y": 0.5

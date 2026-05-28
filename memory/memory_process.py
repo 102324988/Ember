@@ -6,6 +6,7 @@ import concurrent.futures
 from config.settings import settings
 from core.event_bus import EventBus, Event
 from brain.llm_client import LLMClient
+from brain.tag_utils import remove_speech_tags
 from memory.neo4j_memory import Neo4jGraphMemory
 
 logger = logging.getLogger(__name__)
@@ -66,6 +67,12 @@ class Hippocampus:
                 raise json.JSONDecodeError("Failed to extract JSON", resp, 0)
 
             for mem in memories:
+                # 预先清理可能包含在 LLM 生成的摘要中的标签
+                if "content" in mem:
+                    mem["content"] = remove_speech_tags(mem["content"])
+                if "insight" in mem:
+                    mem["insight"] = remove_speech_tags(mem["insight"])
+                
                 logger.info(f"Preprocessed memory: {mem}")
                 self.event_bus.publish(Event("memory.store", mem))
         except (TypeError, json.JSONDecodeError) as e:

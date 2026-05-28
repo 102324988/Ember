@@ -4,16 +4,18 @@ import os
 import re
 import copy
 from concurrent.futures import ThreadPoolExecutor
-from brain.tag_utils import extract_thought_and_speech
+from brain.tag_utils import extract_thought_and_speech, remove_speech_tags
 from config.settings import settings
 
 
 def separate_thought_and_speech(text):
-    """分离 thought 和 speech（使用增强的容错处理）"""
+    """分离 thought 和 speech"""
     thought, speech = extract_thought_and_speech(text)
     # 如果没有提取到 speech，返回原始文本
     if not speech:
         speech = text.strip()
+    # 移除 <speech> 标签，只保留纯文本内容
+    speech = remove_speech_tags(speech)
     return thought, speech
 
 
