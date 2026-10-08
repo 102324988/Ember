@@ -139,7 +139,7 @@ class Neo4jImporter(BaseImporter):
             )
 
             return ImportResult(
-                success=True,
+                success=stats['errors'] == 0,
                 message=f"已导入 {stats['nodes']} 节点, {stats['relations']} 关系",
                 stats=stats,
             )
@@ -208,6 +208,7 @@ class Neo4jImporter(BaseImporter):
         # 批量创建关系
         if relations:
             stats["relations"] = self._batch_create_relations(session, relations)
+        stats['errors'] = (len(nodes) - stats['nodes']) + (len(relations) - stats['relations'])
 
         return stats
 

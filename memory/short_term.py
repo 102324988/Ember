@@ -24,6 +24,7 @@ class ShortTermMemory:
     def __init__(self, max_memory_size=20, base_prompt=None, state="initial"):
         self.max_memory_size = max_memory_size
         self.memory = []
+        self._lock = threading.RLock()
         self.base_prompt = "你是一名助手"
         if base_prompt:
             self.base_prompt = base_prompt
@@ -35,6 +36,11 @@ class ShortTermMemory:
             if os.path.exists("./config/chat_memory.json"):
                 with open("./config/chat_memory.json", "r", encoding="utf-8") as f:
                     self.memory = json.load(f)
+                    self.memory = [m for m in self.memory if not (
+                        m.get('role') == 'assistant' and extract_thought_and_speech(m.get('content', ''))[0]
+                        and not extract_thought_and_speech(m.get('content', ''))[1])]
+                    for message in self.memory:
+                        message.setdefault('timestamp', None)
                     self._truncate_memory()
         except Exception as e:
             print(f"Error loading memory: {e}")
@@ -52,14 +58,8 @@ class ShortTermMemory:
             self.memory = self.memory[-self.max_memory_size :]
 
     def async_log(self, filename, content):
-        def _log():
-            try:
-                with open(filename, "a", encoding="utf-8", buffering=1) as f:
-                    f.write(content + "\n")
-            except Exception as e:
-                print(f"Error writing log: {e}")
-
-        self._executor.submit(_log)
+        with open(filename, "a", encoding="utf-8") as f:
+            f.write(content + "\n")
 
     def _async_log_clear(self, filename):
         def _log():
@@ -71,9 +71,16 @@ class ShortTermMemory:
 
         self._executor.submit(_log)
 
-    def add_message(self, role, content):
+    def add_message(self, role, content, timestamp=None, message_id=None):
+        with self._lock:
+            self._add_message(role, content, timestamp, message_id)
+
+    def _add_message(self, role, content, timestamp=None, message_id=None):
         if role == "assistant":
             _, speech = separate_thought_and_speech(content)
+            thought, _ = extract_thought_and_speech(content)
+            if thought and not extract_thought_and_speech(content)[1]:
+                return
             self._add_back(role, speech)
             self.async_log(
                 "./config/chat_history.log",
@@ -85,17 +92,17 @@ class ShortTermMemory:
                 "./config/chat_history.log",
                 f"{role}: {content}",
             )
+        self.memory[-1].update(timestamp=timestamp, message_id=message_id)
         self._save_memory()
 
     def _save_memory(self):
-        def _save():
-            try:
-                with open("./config/chat_memory.json", "w", encoding="utf-8") as f:
-                    json.dump(self.memory, f, ensure_ascii=False, indent=4)
-            except Exception as e:
-                print(f"Error saving memory: {e}")
-
-        self._executor.submit(_save)
+        # Synchronous atomic replacement prevents stale background snapshots overwriting new ones.
+        from pathlib import Path
+        file = Path('./config/chat_memory.json')
+        file.parent.mkdir(parents=True, exist_ok=True)
+        temp = file.with_suffix('.tmp')
+        temp.write_text(json.dumps(self.memory, ensure_ascii=False, indent=2), encoding='utf-8')
+        temp.replace(file)
 
     def update_base_prompt(self, new_base_prompt):
         self.base_prompt = new_base_prompt

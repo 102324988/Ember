@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import './ArchiveModal.css';
 
-const API_BASE = 'http://localhost:8000/api/archive';
+import { API_BASE as BACKEND_URL, getJSON } from './api';
+const API_BASE = `${BACKEND_URL}/api/archive`;
 
 function ArchiveModal({ isOpen, onClose }) {
     const [archives, setArchives] = useState([]);
@@ -17,8 +18,7 @@ function ArchiveModal({ isOpen, onClose }) {
     // 加载存档列表
     const loadArchives = async () => {
         try {
-            const res = await fetch(`${API_BASE}/list`);
-            const data = await res.json();
+            const data = await getJSON(`${API_BASE}/list`);
             if (data.success) {
                 setArchives(data.archives || []);
             }
@@ -31,8 +31,7 @@ function ArchiveModal({ isOpen, onClose }) {
     // 加载时间加速因子
     const fetchTimeAccel = async () => {
         try {
-            const res = await fetch('http://localhost:8000/config');
-            const data = await res.json();
+            const data = await getJSON(`${BACKEND_URL}/config`);
             if (data.time_accel_factor !== undefined) {
                 setTimeAccelFactor(data.time_accel_factor);
             }
@@ -45,7 +44,7 @@ function ArchiveModal({ isOpen, onClose }) {
     const handleTimeAccelChange = async (newFactor) => {
         setTimeAccelFactor(newFactor);
         try {
-            await fetch('http://localhost:8000/config/time_accel', {
+            await getJSON(`${BACKEND_URL}/config/time_accel`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ factor: newFactor }),
@@ -75,7 +74,7 @@ function ArchiveModal({ isOpen, onClose }) {
         setError('');
 
         try {
-            const res = await fetch(`${API_BASE}/create`, {
+            const data = await getJSON(`${API_BASE}/create`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -83,7 +82,6 @@ function ArchiveModal({ isOpen, onClose }) {
                     description: newSlotDesc.trim()
                 })
             });
-            const data = await res.json();
 
             if (data.success) {
                 setProgress({ message: '存档创建成功！', percent: 100 });
@@ -115,12 +113,11 @@ function ArchiveModal({ isOpen, onClose }) {
         setError('');
 
         try {
-            const res = await fetch(`${API_BASE}/load`, {
+            const data = await getJSON(`${API_BASE}/load`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ slot_name: slotName })
             });
-            const data = await res.json();
 
             if (data.success) {
                 setProgress({ message: '存档加载成功！', percent: 100 });
@@ -150,10 +147,9 @@ function ArchiveModal({ isOpen, onClose }) {
         setError('');
 
         try {
-            const res = await fetch(`${API_BASE}/${encodeURIComponent(slotName)}`, {
+            const data = await getJSON(`${API_BASE}/${encodeURIComponent(slotName)}`, {
                 method: 'DELETE'
             });
-            const data = await res.json();
 
             if (data.success) {
                 loadArchives();
@@ -174,8 +170,7 @@ function ArchiveModal({ isOpen, onClose }) {
         setError('');
 
         try {
-            const res = await fetch(`${API_BASE}/quick-save`, { method: 'POST' });
-            const data = await res.json();
+            const data = await getJSON(`${API_BASE}/quick-save`, { method: 'POST' });
 
             if (data.success) {
                 setProgress({ message: '快速存档成功！', percent: 100 });
@@ -204,8 +199,7 @@ function ArchiveModal({ isOpen, onClose }) {
         setError('');
 
         try {
-            const res = await fetch(`${API_BASE}/quick-load`, { method: 'POST' });
-            const data = await res.json();
+            const data = await getJSON(`${API_BASE}/quick-load`, { method: 'POST' });
 
             if (data.success) {
                 setProgress({ message: '快速读档成功！', percent: 100 });

@@ -3,6 +3,8 @@ import { Radar, RadarChart, PolarGrid, PolarAngleAxis, ResponsiveContainer } fro
 import './App.css'
 import Live2DViewer from './Live2DViewer';
 import ArchiveModal from './ArchiveModal';
+import { API_BASE, WS_URL, getJSON } from './api';
+import { mergeHistory, messageKey } from './messageHistory';
 
 function App() {
   const [messages, setMessages] = useState([]);
@@ -13,6 +15,9 @@ function App() {
   const [showThought, setShowThought] = useState(false);
   const [logicalTime, setLogicalTime] = useState("");
   const [isThinking, setIsThinking] = useState(false);
+  const [serviceStatus, setServiceStatus] = useState(null);
+  const [historyError, setHistoryError] = useState('');
+  const historyLoadingRef = useRef(false);
   const [toastMessage, setToastMessage] = useState("");
   const [showTimeline, setShowTimeline] = useState(false);
   const [showArchive, setShowArchive] = useState(false);
@@ -42,11 +47,11 @@ function App() {
     if (timeTimerRef.current) return;
 
     const fetchTime = () => {
-      fetch("http://localhost:8000/config")
-        .then(res => res.json())
+      getJSON(`${API_BASE}/config`)
         .then(data => {
           if (data.logical_time) setLogicalTime(data.logical_time);
           setIsThinking(data.is_thinking || false);
+          setServiceStatus(data.status || null);
         })
         .catch(() => { });
     };
@@ -132,8 +137,7 @@ function App() {
 
   // 获取后端角色配置
   useEffect(() => {
-    fetch("http://localhost:8000/config")
-      .then(res => res.json())
+    getJSON(`${API_BASE}/config`)
       .then(data => {
         if (data.error) {
           console.error("加载配置失败:", data.error);
@@ -150,18 +154,18 @@ function App() {
   }, []);
 
   // 加载分页历史记录
-  const loadHistory = async (before = null) => {
-    if (isLoadingHistory || (!hasMore && before)) return;
+  const loadHistory = async (before = null, beforeId = null) => {
+    if (historyLoadingRef.current || (!hasMore && before)) return;
+    historyLoadingRef.current = true;
 
     setIsLoadingHistory(true);
-    const url = `http://localhost:8000/history?limit=20${before ? `&before=${before}` : ""}`;
+    const url = `${API_BASE}/history?limit=20${before ? `&before=${before}` : ""}${beforeId ? `&before_id=${beforeId}` : ''}`;
     try {
-      const res = await fetch(url);
-      const data = await res.json();
+      const data = await getJSON(url);
+      if (!Array.isArray(data)) throw new Error('聊天记录接口返回格式无效');
+      setHistoryError('');
       if (Array.isArray(data)) {
-        if (data.length < 20) {
-          setHasMore(false);
-        }
+        setHasMore(data.length === 20);
 
         // 统一处理历史记录：数据库返回 DESC，我们需要将其反转为时间正序显示
         const historyData = [...data].reverse();
@@ -169,7 +173,7 @@ function App() {
         if (before) {
           // 向上加载更多，需要保持滚动位置
           const originalHeight = listRef.current?.scrollHeight || 0;
-          setMessages(prev => [...historyData, ...prev]);
+          setMessages(prev => mergeHistory(prev, historyData));
 
           // 加载完成后恢复滚动位置（会在渲染后处理）
           setTimeout(() => {
@@ -180,7 +184,7 @@ function App() {
           }, 0);
         } else {
           // 初始加载，滚到底部
-          setMessages(historyData);
+          setMessages(prev => mergeHistory(prev, historyData));
           // 增加延迟和多次尝试，确保在内容完全渲染后滚动到底部
           setTimeout(() => scrollToBottom(), 100);
           setTimeout(() => scrollToBottom(), 300);
@@ -189,19 +193,28 @@ function App() {
       }
     } catch (err) {
       console.error("加载历史失败:", err);
+      setHistoryError(err.message || '聊天记录加载失败');
     } finally {
       setIsLoadingHistory(false);
+      historyLoadingRef.current = false;
     }
   };
 
   // 监听滚动到顶部
+  useEffect(() => {
+    if (!historyError) return;
+    const timer = setInterval(() => loadHistory(), 5000);
+    return () => clearInterval(timer);
+  }, [historyError]);
+
   const handleScroll = (e) => {
     if (e.target.scrollTop === 0 && hasMore && !isLoadingHistory && !showLogs) {
       // 找到目前最早的一条聊天记录的时间（非系统日志）
       const chatMessages = messages.filter(m => m.role !== 'system');
       if (chatMessages.length > 0) {
         const oldestTimestamp = chatMessages[0].timestamp;
-        loadHistory(oldestTimestamp);
+        const oldest = chatMessages[0];
+        loadHistory(oldestTimestamp, oldest.history_id || (typeof oldest.id === 'number' ? oldest.id : null));
       }
     }
   };
@@ -287,24 +300,33 @@ function App() {
     // 延迟连接以避开 React Strict Mode 的重复初始化干扰
     const connectWS = () => {
       console.log("正在尝试建立 WebSocket 连接...");
-      ws.current = new WebSocket("ws://localhost:8000/ws/chat");
+      ws.current = new WebSocket(WS_URL);
 
       ws.current.onopen = () => {
         console.log("WebSocket 连接已打开");
+        loadHistory();
         setMessages(prev => [...prev.filter(m => m.id !== 'ws-status'), { role: "system", content: "WebSocket 连接已建立", id: 'ws-status' }]);
       };
 
       ws.current.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data);
+          if (data.type === 'ping') {
+            ws.current?.send(JSON.stringify({ type: 'pong' }));
+            return;
+          }
+          if (data.type === 'error') {
+            setToastMessage(data.content);
+            return;
+          }
           console.log("收到 WebSocket 数据对象:", data);
 
           if (data.type === 'message') {
             // ... (保持不变)
-            const messageId = data.id || Date.now();
+            const messageId = data.message_id || data.id || Date.now();
             setMessages(prev => {
               const mappedRole = (data.sender === 'ai' || data.sender === 'assistant' || data.sender === 'bot') ? 'ai' : 'user';
-              const existingIndex = prev.findIndex(m => m.id === messageId && m.role === mappedRole);
+              const existingIndex = prev.findIndex(m => (m.message_id || m.id) === messageId && m.role === mappedRole);
 
               let updatedFullContent = "";
               if (existingIndex !== -1) {
@@ -360,6 +382,7 @@ function App() {
               } else {
                 return [...prev, {
                   role: mappedRole,
+                  message_id: data.message_id,
                   content: displayContent,
                   rawContent: updatedFullContent,
                   id: messageId,
@@ -470,8 +493,7 @@ function App() {
   const handleSend = async () => {
     // 立即请求最新状态，判断是否正在思考
     try {
-      const configRes = await fetch("http://localhost:8000/config");
-      const configData = await configRes.json();
+      const configData = await getJSON(`${API_BASE}/config`);
       if (configData.is_thinking) {
         setToastMessage("依鸣正在思考中，请稍候...");
         setTimeout(() => setToastMessage(""), 2000);
@@ -571,6 +593,22 @@ function App() {
     if (e.key === 'Enter') handleSend();
   };
 
+  const handleLive2DTouch = (part) => {
+    if (ws.current && ws.current.readyState === WebSocket.OPEN) {
+      const messageId = Date.now();
+      const actionText = part === 'head' ? "*(用户摸了摸你的头)*" : "*(用户触碰了你的身体)*";
+      ws.current.send(JSON.stringify({
+        sender: "user",
+        format: "text",
+        content: actionText,
+        id: messageId
+      }));
+    }
+  };
+
+  const visibleMessages = messages.filter(msg => showLogs ? msg.role === 'system'
+    : msg.role !== 'system' && (msg.role !== 'ai' || Boolean(msg.content)));
+
   return (
     <div className={`app-container ${isSidebarOpen ? 'sidebar-open' : ''}`}>
       {/* Toast 提示 */}
@@ -583,6 +621,7 @@ function App() {
         currentEmotion={currentEmotion}
         audio={currentAudio}
         modelPath={config?.live2d?.model_path}
+        onTouch={handleLive2DTouch}
       />
 
       {/* 存档按钮 - 右下角 */}
@@ -606,6 +645,14 @@ function App() {
       <div className="status-overlay">
         <div className="status-header">
           <div className="logic-clock-mini">当前时间: {logicalTime || "SYNCING..."}</div>
+          {serviceStatus && (!serviceStatus.database?.ready || !serviceStatus.long_term_memory?.ready
+            || serviceStatus.scene?.state === 'needs_confirmation') && (
+            <div role="status" style={{ color: '#ffcf80', fontSize: 12 }}>
+              {!serviceStatus.database?.ready && '聊天记录保存异常；'}
+              {!serviceStatus.long_term_memory?.ready && '长期记忆不可用；'}
+              {serviceStatus.scene?.state === 'needs_confirmation' && '当前场景待确认'}
+            </div>
+          )}
         </div>
         <div className="status-radar">
           <ResponsiveContainer width="100%" height="100%">
@@ -702,14 +749,18 @@ function App() {
         </div>
         <div className="message-list" ref={listRef} onScroll={handleScroll}>
           <>
+            {historyError && (
+              <div role="alert" style={{ color: '#ffcf80', padding: 12 }}>
+                {historyError} <button onClick={() => loadHistory()}>重新加载</button>
+              </div>
+            )}
             {isLoadingHistory && (
               <div className="loading-history">加载历史记录中...</div>
             )}
             {!hasMore && !showLogs && messages.length > 10 && (
               <div className="no-more">—— 没有更多记录了 ——</div>
             )}
-            {messages
-              .filter(msg => showLogs ? msg.role === "system" : msg.role !== "system")
+            {visibleMessages
               .map((msg, index, array) => {
                 const isFirstInGroup = index === 0 || array[index - 1].role !== msg.role;
 
@@ -718,7 +769,7 @@ function App() {
                   new Date(Number(array[index - 1].timestamp)).toDateString() !== new Date(Number(msg.timestamp)).toDateString();
 
                 return (
-                  <React.Fragment key={msg.id || index}>
+                  <React.Fragment key={msg.id ? messageKey(msg) : index}>
                     {showDateSeparator && !showLogs && msg.timestamp && (
                       <div className="date-separator">
                         <span>{formatDateLabel(msg.timestamp)}</span>
@@ -766,7 +817,7 @@ function App() {
                   </React.Fragment>
                 );
               })}
-            {messages.filter(msg => showLogs ? msg.role === "system" : msg.role !== "system").length === 0 && (
+            {visibleMessages.length === 0 && (
               <div style={{ textAlign: 'center', color: '#999', marginTop: '20px', fontSize: '12px' }}>
                 {showLogs ? "暂无系统日志" : "暂无对话记录"}
               </div>

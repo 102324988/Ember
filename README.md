@@ -144,7 +144,7 @@ cd ..
 docker-compose up -d
 ```
 启动后可访问：
-- **PostgreSQL**: `localhost:5432` (向量存储)
+- **PostgreSQL**: `127.0.0.1:5433` (Docker 向量存储，与本机 PostgreSQL 隔离)
 - **Neo4j Browser**: `http://localhost:7474` (知识图谱可视化)
 - **Neo4j Bolt**: `bolt://localhost:7687`
 
@@ -184,10 +184,10 @@ npm run dev
 |--------|------|
 | `START_TIME` | 设置启动时间（ISO 8601 格式），留空则使用当前系统时间，设为 `?` 则使用上次关闭时的时间 |
 | `TIME_ACCEL_FACTOR` | 时间加速倍率，如 `10` 表示现实 1 秒 = 逻辑时间 10 秒。可在前端存档弹窗中实时调节 |
-| `STATE_IDLE_MIN_TIMEOUT` | 空闲状态最小超时时间，单位为**真实世界秒数**（内部会乘以加速因子） |
-| `STATE_IDLE_MAX_TIMEOUT` | 空闲状态最大超时时间，单位为**真实世界秒数**（内部会乘以加速因子） |
+| `STATE_IDLE_MIN_TIMEOUT` | 空闲状态最小超时时间，单位为**真实世界秒数** |
+| `STATE_IDLE_MAX_TIMEOUT` | 空闲状态最大超时时间，单位为**真实世界秒数** |
 
-> **提示**：空闲超时参数直接填写真实世界的时间即可，系统会自动根据加速因子换算。例如 `TIME_ACCEL_FACTOR=5` 时，`STATE_IDLE_MIN_TIMEOUT=300`（真实世界5分钟）会在游戏内表现为25分钟。
+> **提示**：空闲超时参数直接填写真实世界的时间。例如 `TIME_ACCEL_FACTOR=5` 时，`STATE_IDLE_MIN_TIMEOUT=300` 仍等待真实世界5分钟，此时逻辑时间前进25分钟；运行中调节倍率不会改变真实等待间隔。
 
 #### 推荐加速配置
 
@@ -205,6 +205,8 @@ START_TIME=?
 ---
 
 ## 🔬 性能基准测试
+
+数据迁移、故障恢复、时间与场景规则及隔离测试说明见 [REPAIR_NOTES.md](REPAIR_NOTES.md)。
 
 `utils/benchmark_runner.py` 是自动化 A/B Token 消耗基准测试工具，读取 `test_script.json` 固定脚本，控制温度为 0 消除随机性，输出逐轮归因分析报告。
 

@@ -51,6 +51,7 @@ def main():
     brain = Brain(event_bus, state_manager, memory, hippocampus, tool_processor)
     db_memory = DBMemory(event_bus)
 
+    state_manager.prepare_startup()
     heartbeat.start()
 
     threading.Thread(target=get_user_input, daemon=True).start()

@@ -182,7 +182,7 @@ class ArchiveManager:
                     pg_exporter = PostgresExporter(str(temp_path))
                     pg_result = pg_exporter.run()
                     if not pg_result.success:
-                        logger.warning(f"导出数据库部分失败: {pg_result.error}")
+                        raise ArchiveError(f"导出数据库失败: {pg_result.error}")
                     self._report_progress(
                         "数据库导出完成",
                         55,
@@ -197,7 +197,7 @@ class ArchiveManager:
                     neo4j_exporter = Neo4jExporter(str(temp_path))
                     neo4j_result = neo4j_exporter.run()
                     if not neo4j_result.success:
-                        logger.warning(f"导出知识图谱部分失败: {neo4j_result.error}")
+                        raise ArchiveError(f"导出知识图谱失败: {neo4j_result.error}")
                     self._report_progress(
                         "知识图谱导出完成",
                         75,
@@ -372,11 +372,7 @@ class ArchiveManager:
                             {"backup_slot": auto_backup_result.get("backup_slot", "")},
                         )
                     else:
-                        self._report_progress(
-                            "备份跳过",
-                            45,
-                            {"reason": auto_backup_result.get("reason", "")},
-                        )
+                        raise ArchiveError('自动备份当前状态失败，已中止读档')
 
                     # Step 8: 备份当前状态 (用于回滚) (45-50%)
                     self._report_progress("创建回滚点", 48)
@@ -422,7 +418,7 @@ class ArchiveManager:
                         )
 
                     if not neo4j_result[0] or not neo4j_result[0].success:
-                        logger.warning(
+                        raise ArchiveError(
                             f"导入知识图谱部分失败: {neo4j_result[0].error if neo4j_result[0] else '未知错误'}"
                         )
 
@@ -456,6 +452,10 @@ class ArchiveManager:
                     # Step 12: 重建内存状态 (85-95%)
                     self._report_progress("重建内存状态", 88)
                     self._reload_memory_state()
+                    if self.event_bus and manifest.logical_time:
+                        self.event_bus.restore_logical_time(manifest.logical_time)
+                        if self.state_manager:
+                            self.state_manager.last_interaction_logical_time = self.event_bus.logical_now
                     self._report_progress("内存状态重建完成", 95)
 
                     # 清理备份
@@ -649,23 +649,46 @@ class ArchiveManager:
 
     def _pause_system(self):
         """暂停系统组件"""
+        self._operation_lock_held = False
+        if self.event_bus:
+            self.event_bus.paused = True
         if self.heartbeat:
-            self.heartbeat.stop()
-            logger.debug("心跳已暂停")
-
-        if self.state_manager:
-            # 锁定状态管理器
-            pass  # StateManager 需要添加 lock/unlock 方法
+            self.heartbeat.pause()
+        try:
+            if self.event_bus:
+                with self.event_bus.pending_condition:
+                    if not self.event_bus.pending_condition.wait_for(lambda: self.event_bus.pending_dialogues == 0, timeout=120):
+                        raise ArchiveError('已接收的对话尚未完成，存读档已中止')
+                self.event_bus.operation_lock.acquire()
+                self._operation_lock_held = True
+            if self.heartbeat:
+                self.heartbeat.stop()
+            if self.db_memory and not self.db_memory.flush():
+                raise ArchiveError('数据库存在未保存消息，存读档已中止')
+            if self.episodic_memory:
+                import time
+                deadline = time.monotonic() + 60
+                while self.episodic_memory.store_queue.unfinished_tasks:
+                    if time.monotonic() > deadline:
+                        raise ArchiveError('长期记忆任务尚未完成，存读档已中止')
+                    time.sleep(0.05)
+                if any(self.episodic_memory.spool_dir.glob('*.json')):
+                    raise ArchiveError('长期记忆存在未保存任务，存读档已中止')
+        except Exception:
+            self._resume_system()
+            raise
 
     def _resume_system(self):
         """恢复系统组件"""
+        if self.event_bus:
+            self.event_bus.paused = False
+            if getattr(self, '_operation_lock_held', False):
+                self.event_bus.operation_lock.release()
+                self._operation_lock_held = False
         if self.heartbeat:
             self.heartbeat.start()
             logger.debug("心跳已恢复")
 
-        if self.state_manager:
-            # 解锁状态管理器
-            pass
 
     def _reload_memory_state(self):
         """重建内存状态"""
@@ -684,6 +707,7 @@ class ArchiveManager:
 
                     self.state_manager.current_state = json.load(f)
                 logger.debug("状态已重载")
+                self.state_manager.after_restore()
 
         # 发布状态重载事件
         self._publish_event("state.reload")
@@ -709,6 +733,8 @@ class ArchiveManager:
             except Exception:
                 pass
 
+        if self.event_bus:
+            logical_time = self.event_bus.formatted_logical_now
         return ArchiveManifest(
             version=get_current_version(),
             created_at=datetime.now().isoformat(),
@@ -844,10 +870,14 @@ class ArchiveManager:
                 # 导出 PostgreSQL 数据
                 pg_exporter = PostgresExporter(str(temp_path))
                 pg_result = pg_exporter.run()
+                if not pg_result.success:
+                    raise ArchiveError('自动备份数据库失败')
 
                 # 导出 Neo4j 数据
                 neo4j_exporter = Neo4jExporter(str(temp_path))
                 neo4j_result = neo4j_exporter.run()
+                if not neo4j_result.success:
+                    raise ArchiveError('自动备份知识图谱失败')
 
                 # 生成元数据
                 manifest = self._create_manifest(
@@ -861,6 +891,7 @@ class ArchiveManager:
                 )
 
                 # 写入 manifest
+                manifest.checksum = calculate_dir_checksum(temp_dir, exclude_files=['manifest.json'])
                 manifest_path = temp_path / "manifest.json"
                 with open(manifest_path, "w", encoding="utf-8") as f:
                     f.write(manifest.to_json())
@@ -899,6 +930,20 @@ class ArchiveManager:
             backup_dir = Path(self.archive_dir) / "_temp_backup"
             backup_dir.mkdir(parents=True, exist_ok=True)
             backup_info["backup_dir"] = str(backup_dir)
+            if self.event_bus:
+                backup_info['logical_time'] = self.event_bus.logical_now
+            from memory.postgres import connection
+            with connection() as conn:
+                importer = PostgresImporter(str(backup_dir))
+                for table in importer.TABLES:
+                    if not importer.backup_table(conn, table):
+                        raise ArchiveError(f'无法备份数据库表: {table}')
+            graph_result = Neo4jExporter(str(backup_dir)).run()
+            if not graph_result.success:
+                raise ArchiveError('无法建立知识图谱回滚点')
+            log_path = self.config_dir / 'chat_history.log'
+            if log_path.exists():
+                backup_info['chat_history'] = log_path.read_text(encoding='utf-8')
 
             # 备份 state.json
             state_path = self.config_dir / "state.json"
@@ -922,6 +967,7 @@ class ArchiveManager:
 
         except Exception as e:
             logger.error(f"备份当前状态失败: {e}")
+            raise ArchiveError('无法创建完整回滚点，已中止读档') from e
 
         return backup_info
 
@@ -956,9 +1002,18 @@ class ArchiveManager:
                 logger.info("已回滚 chat_memory.json")
 
             # 尝试从数据库备份恢复
+            if 'chat_history' in backup_info:
+                (self.config_dir / 'chat_history.log').write_text(backup_info['chat_history'], encoding='utf-8')
             backup_dir = backup_info.get("backup_dir")
             if backup_dir:
-                self._rollback_database(backup_dir)
+                if not self._rollback_database(backup_dir):
+                    raise ArchiveError('数据库回滚失败')
+                graph_result = Neo4jImporter(backup_dir).run()
+                if not graph_result.success:
+                    raise ArchiveError('知识图谱回滚失败')
+            self._reload_memory_state()
+            if self.event_bus and backup_info.get('logical_time'):
+                self.event_bus.restore_logical_time(backup_info['logical_time'])
 
             logger.info("状态回滚完成")
             return True
@@ -1006,9 +1061,14 @@ class ArchiveManager:
                         cursor.execute(
                             f"INSERT INTO {table} SELECT * FROM {backup_table};"
                         )
+                        from memory.postgres import sync_sequence
+                        sync_sequence(conn, table)
                         logger.info(f"已从备份恢复表: {table}")
                 except Exception as e:
                     logger.warning(f"恢复表 {table} 失败: {e}")
+                    conn.rollback()
+                    conn.close()
+                    return False
 
             conn.commit()
             cursor.close()

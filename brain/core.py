@@ -7,6 +7,7 @@ import threading
 import logging
 from memory.memory_process import Hippocampus
 import json
+import uuid
 from brain.tag_utils import validate_and_fix_llm_output
 from tools.processor import ToolCallProcessor
 
@@ -49,19 +50,43 @@ class Brain:
 
     def _on_user_input(self, event: Event):
         user_msg = event.data["text"]
-        thread = threading.Thread(target=self.process_dialogue, args=(user_msg,))
+        with self.event_bus.pending_condition:
+            if self.event_bus.paused:
+                return
+            self.event_bus.pending_dialogues += 1
+        thread = threading.Thread(target=self._accepted_dialogue, args=(user_msg, event.data), daemon=True)
         thread.start()
+
+    def _accepted_dialogue(self, text, metadata):
+        try:
+            self.process_dialogue(text, metadata, _accepted=True)
+        finally:
+            with self.event_bus.pending_condition:
+                self.event_bus.pending_dialogues -= 1
+                self.event_bus.pending_condition.notify_all()
 
     def _on_idle_speak(self, event: Event):
         def _speak():
-            with self.lock:
-                self.memory.update_base_prompt(settings.SYSTEM_PROMPT)
-            self._llm_speak(self.memory, pack=True, memories="")
+            with self.event_bus.operation_lock:
+                if self.event_bus.paused:
+                    return
+                self._is_processing = True
+                try:
+                    self.memory.update_base_prompt(self.tool_processor.build_system_prompt_with_tools(settings.SYSTEM_PROMPT))
+                    self._llm_speak(self.memory, pack=True, proactive=True)
+                finally:
+                    self._is_processing = False
 
         thread = threading.Thread(target=_speak)
         thread.start()
 
-    def process_dialogue(self, user_message):
+    def process_dialogue(self, user_message, metadata=None, _accepted=False):
+        with self.event_bus.operation_lock:
+            if self.event_bus.paused and not _accepted:
+                return
+            return self._process_dialogue(user_message, metadata or {})
+
+    def _process_dialogue(self, user_message, metadata):
         # 防止并发处理
         if self._is_processing:
             logger.warning("正在处理中，忽略新输入")
@@ -70,7 +95,10 @@ class Brain:
         try:
             self._is_processing = True
 
-            self.memory.add_message("user", user_message)
+            self.memory.add_message("user", user_message,
+                timestamp=metadata.get('timestamp', int(self.event_bus.logical_now * 1000)),
+                message_id=metadata.get('message_id', str(uuid.uuid4())))
+            self.state_manager.prepare_dialogue(user_message)
 
             # 异步更新 base_prompt（不阻塞 LLM 调用）
             # 注：实际注入到消息中是在 _llm_speak 中完成的
@@ -82,9 +110,11 @@ class Brain:
         finally:
             self._is_processing = False
 
-    def _llm_speak(self, memory, pack: bool = False, memories: str = ""):
+    def _llm_speak(self, memory, pack: bool = False, memories: str = "", proactive=False):
         # 立即发布 llm.started 事件，让前端尽早显示"正在思考"
-        self.event_bus.publish(Event(name="llm.started", data=""))
+        message_id = str(uuid.uuid4())
+        timestamp = int(self.event_bus.logical_now * 1000)
+        self.event_bus.publish(Event(name="llm.started", data={'message_id': message_id, 'timestamp': timestamp}))
 
         # 在锁外准备数据，减少锁持有时间
         with self.lock:
@@ -100,7 +130,8 @@ class Brain:
                 role_label = (
                     "对方" if msg["role"] == "user" else f"{settings.CHARACTER_NAME}"
                 )
-                history_parts.append(f"{role_label}: {msg['content']}\n")
+                when = self.event_bus.format_logical_time(msg['timestamp'] / 1000) if msg.get('timestamp') else '时间未知，仅为历史背景'
+                history_parts.append(f"[{when}] {role_label}: {msg['content']}\n")
             formatted_history = "".join(history_parts)
 
             dynamic_context = ""
@@ -108,6 +139,8 @@ class Brain:
                 dynamic_context = f"\n\n[脑海闪现的记忆]：\n{memories}\n"
 
             state_injection = self.state_manager.prompt_injection
+            if proactive:
+                state_injection += self.state_manager.speaking_prompt_injection
 
             user_content = f"""以下是对话历史：
 {formatted_history}{dynamic_context}{state_injection}
@@ -273,13 +306,10 @@ class Brain:
             logger.info(f"LLM回复: {full_content[:100]}...")
 
             try:
-                self.memory.add_message("assistant", full_content)
+                self.memory.add_message("assistant", full_content, timestamp=timestamp, message_id=message_id)
             except Exception as e:
                 logger.error(f"保存消息失败: {e}")
 
             self.event_bus.publish(
-                Event(name="llm.finished", data={"text": full_content})
-            )
-            self.event_bus.publish(
-                Event(name="user_interaction", data=self.memory.get_memory())
+                Event(name="llm.finished", data={"text": full_content, 'message_id': message_id, 'timestamp': timestamp})
             )

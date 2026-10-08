@@ -1,6 +1,10 @@
 from collections import defaultdict
 import logging
 import time
+import threading
+import math
+from datetime import datetime
+from core.time_utils import get_timezone, to_epoch
 from typing import Callable, Any, Dict, List
 from config.settings import settings
 
@@ -19,29 +23,28 @@ class Event:
 class EventBus:
     def __init__(self):
         self._subscribers: Dict[str, List[Callable[[Event], None]]] = defaultdict(list)
+        self.operation_lock = threading.RLock()
+        self.paused = False
+        self.pending_condition = threading.Condition()
+        self.pending_dialogues = 0
+        self.timezone = get_timezone()
         self._init_time()
 
     def _init_time(self):
         self.time_accel_factor = settings.TIME_ACCEL_FACTOR
-        if isinstance(settings.START_TIME, str):
-            try:
-                self._base_logical_time = time.mktime(
-                    time.strptime(settings.START_TIME, "%Y-%m-%d %H:%M:%S")
-                )
-            except Exception:
-                self._base_logical_time = time.time()
-        else:
-            self._base_logical_time = float(settings.START_TIME)
-        self._real_start_time = time.time()
+        try:
+            self._base_logical_time = to_epoch(settings.START_TIME) if settings.START_TIME else time.time()
+        except (ValueError, TypeError):
+            warning = "START_TIME 格式无效，已使用当前现实时间"
+            settings.CONFIG_WARNINGS.append(warning)
+            logger.warning(warning)
+            self._base_logical_time = time.time()
+        self._real_start_time = time.monotonic()
 
     @property
     def logical_now(self):
-        real_elapsed = time.time() - self._real_start_time
+        real_elapsed = time.monotonic() - self._real_start_time
         logical_time = self._base_logical_time + (real_elapsed * self.time_accel_factor)
-        formatted_time = time.strftime(
-            "%Y-%m-%d %H:%M:%S", time.localtime(logical_time)
-        )
-        # logger.debug(f"[Logical Time Access] {formatted_time}")
         return logical_time
 
     @property
@@ -49,11 +52,16 @@ class EventBus:
         return self.format_logical_time(self.logical_now)
 
     def format_logical_time(self, logical_time, fmt="%Y-%m-%d %H:%M:%S"):
-        return time.strftime(fmt, time.localtime(logical_time))
+        return datetime.fromtimestamp(logical_time, self.timezone).strftime(fmt)
+
+    def restore_logical_time(self, value):
+        with self.operation_lock:
+            self._base_logical_time = to_epoch(value)
+            self._real_start_time = time.monotonic()
 
     def set_time_accel_factor(self, factor: float):
         """动态设置时间加速因子，同时修正基准时间以保持逻辑时间连续"""
-        if factor <= 0:
+        if not math.isfinite(factor) or factor <= 0:
             logger.warning(f"无效的时间加速因子: {factor}，必须大于0")
             return False
 
@@ -65,7 +73,7 @@ class EventBus:
 
         # 重置基准，保持逻辑时间连续
         self._base_logical_time = current_logical
-        self._real_start_time = time.time()
+        self._real_start_time = time.monotonic()
 
         logger.info(f"时间加速因子已更新为: {factor}")
         return True

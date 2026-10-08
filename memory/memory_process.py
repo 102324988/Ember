@@ -29,8 +29,6 @@ class Hippocampus:
             with self._file_lock:
                 with open("./config/chat_history.log", "r", encoding="utf-8") as f:
                     content = f.read()
-                with open("./config/chat_history.log", "w", encoding="utf-8") as f:
-                    f.write("")
                 return content
 
         except FileNotFoundError:
@@ -66,8 +64,17 @@ class Hippocampus:
                 raise json.JSONDecodeError("Failed to extract JSON", resp, 0)
 
             for mem in memories:
+                import uuid
+                mem['memory_id'] = str(uuid.uuid5(uuid.NAMESPACE_URL, res + json.dumps(mem, ensure_ascii=False, sort_keys=True)))
                 logger.info(f"Preprocessed memory: {mem}")
                 self.event_bus.publish(Event("memory.store", mem))
+            # Keep the original experience if encoding failed; appenders may have added a suffix.
+            with self._file_lock:
+                from pathlib import Path
+                file = Path('./config/chat_history.log')
+                current = file.read_text(encoding='utf-8')
+                if current.startswith(res):
+                    file.write_text(current[len(res):], encoding='utf-8')
         except (TypeError, json.JSONDecodeError) as e:
             logger.error(
                 f"Failed to decode LLM response during memory preprocessing: {e}. Raw response: {repr(resp)}"

@@ -1,204 +1,170 @@
-import psycopg2
-from psycopg2.extras import Json, execute_values
-from core.event_bus import EventBus, Event
-from config.settings import settings
-import logging
+"""Durable idempotent writes; history readers own their database connection."""
 import json
+import logging
 import threading
-import re
-from queue import Queue
-from concurrent.futures import ThreadPoolExecutor
+import time
+import uuid
+from datetime import datetime
+from pathlib import Path
+from queue import Queue, Empty
+from core.event_bus import EventBus, Event
 from brain.tag_utils import extract_thought_and_speech
+from memory.postgres import connection, initialize_history
 
 logger = logging.getLogger(__name__)
 
 
 def separate_thought_and_speech(text):
-    """分离 thought 和 speech（使用增强的容错处理）"""
     thought, speech = extract_thought_and_speech(text)
-    # 如果没有提取到 speech，返回原始文本
-    if not speech:
-        speech = text.strip()
-    return thought, speech
+    return thought, speech if thought else (speech or text.strip())
 
 
 class DBMemory:
+    MAX_ATTEMPTS = 5
+
     def __init__(self, event_bus: EventBus):
         self.event_bus = event_bus
         self.store_queue = Queue()
-        self.conn = None
-        self._ensure_connection()
+        self.ready = False
+        self.last_error = None
+        self._stop = threading.Event()
+        self._pending_lock = threading.Lock()
+        self._pending = set()
+        self.spool_dir = Path('data/failed_writes')
+        self.spool_dir.mkdir(parents=True, exist_ok=True)
         self._init_db()
-        self.event_bus.subscribe("user.input", self._on_user_input)
-        self.event_bus.subscribe("llm.finished", self._on_llm_finished)
-        self.event_bus.subscribe("state.update", self._on_state_update)
+        event_bus.subscribe('user.input', self._on_user_input)
+        event_bus.subscribe('llm.finished', self._on_llm_finished)
+        event_bus.subscribe('state.update', self._on_state_update)
+        self.retry_failed()
         self.start()
 
-    def _ensure_connection(self):
-        try:
-            if self.conn is None or self.conn.closed:
-                self.conn = psycopg2.connect(
-                    dbname=settings.PG_DB,
-                    user=settings.PG_USER,
-                    password=settings.PG_PASSWORD,
-                    host=settings.PG_HOST,
-                    port=settings.PG_PORT,
-                    connect_timeout=5,
-                )
-                logger.debug("Successfully connected to PostgreSQL.")
-        except Exception as e:
-            logger.error(f"PostgreSQL connection failed: {e}")
-            self.conn = None
-
     def _init_db(self):
-        self._ensure_connection()
-        if not self.conn:
-            logger.error("Cannot initialize DB: connection failed")
-            return
         try:
-            with self.conn.cursor() as cur:
-                cur.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS message_list (
-                        id SERIAL PRIMARY KEY,
-                        timestamp TIMESTAMP DEFAULT NOW(),
-                        sender TEXT,
-                        text TEXT,
-                        thinking TEXT
-                    );
-                """
-                )
-                self.conn.commit()
-                cur.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS state_list (
-                        id SERIAL PRIMARY KEY,
-                        timestamp TIMESTAMP DEFAULT NOW(),
-                        text TEXT
-                    );
-                """
-                )
-                self.conn.commit()
-        except Exception as e:
-            logger.error(f"Failed to initialize DB: {e}")
+            with connection() as conn:
+                initialize_history(conn)
+            self.ready, self.last_error = True, None
+        except Exception as exc:
+            self.ready, self.last_error = False, str(exc)
+            logger.error('History schema initialization failed: %s', exc)
+
+    def _enqueue(self, table, data):
+        data.setdefault('message_id', str(uuid.uuid4()))
+        entry = {'database': table, 'data': data}
+        file = self.spool_dir / (data['message_id'] + '.json')
+        temp = file.with_suffix('.tmp')
+        temp.write_text(json.dumps(entry, ensure_ascii=False), encoding='utf-8')
+        temp.replace(file)
+        self._schedule(entry)
+
+    def _schedule(self, entry):
+        key = entry['data']['message_id']
+        with self._pending_lock:
+            if key in self._pending:
+                return
+            self._pending.add(key)
+        self.store_queue.put(entry)
+
+    def retry_failed(self):
+        for file in self.spool_dir.glob('*.json'):
+            try:
+                self._schedule(json.loads(file.read_text(encoding='utf-8')))
+            except Exception as exc:
+                logger.error('Cannot replay pending database write: %s', exc)
 
     def _on_user_input(self, event: Event):
-        data = {
-            "sender": "user",
-            "text": event.data["text"],
-            "thinking": "",
-            "timestamp": self.event_bus.formatted_logical_now,
-        }
-        content = {"data": data, "database": "message_list"}
-        self.store_queue.put(content)
+        event.data.setdefault('message_id', str(uuid.uuid4()))
+        event.data.setdefault('timestamp', int(self.event_bus.logical_now * 1000))
+        self._enqueue('message_list', {'sender': 'user', 'text': event.data['text'],
+            'thinking': '', 'timestamp': self.event_bus.format_logical_time(event.data['timestamp'] / 1000),
+            'message_id': event.data['message_id']})
 
     def _on_llm_finished(self, event: Event):
-        thought, speech = separate_thought_and_speech(event.data["text"])
-        data = {
-            "sender": "assistant",
-            "text": speech,
-            "thinking": thought,
-            "timestamp": self.event_bus.formatted_logical_now,
-        }
-        content = {"data": data, "database": "message_list"}
-        self.store_queue.put(content)
-
-    def start(self):
-        threading.Thread(target=self._store_loop, daemon=True).start()
-
-    def get_history(self, limit=20, before_timestamp=None):
-        self._ensure_connection()
-        if not self.conn:
-            return []
-
-        try:
-            with self.conn.cursor() as cur:
-                if before_timestamp:
-                    if isinstance(before_timestamp, (int, float)):
-                        query = "SELECT id, timestamp, sender, text, thinking FROM message_list WHERE timestamp < to_timestamp(%s / 1000.0) ORDER BY timestamp DESC LIMIT %s"
-                    else:
-                        query = "SELECT id, timestamp, sender, text, thinking FROM message_list WHERE timestamp < %s ORDER BY timestamp DESC LIMIT %s"
-                    cur.execute(query, (before_timestamp, limit))
-                else:
-                    cur.execute(
-                        """
-                        SELECT id, timestamp, sender, text, thinking 
-                        FROM message_list 
-                        ORDER BY timestamp DESC 
-                        LIMIT %s
-                    """,
-                        (limit,),
-                    )
-
-                rows = cur.fetchall()
-                messages = []
-                for row in rows:
-                    raw_ts = row[1]
-                    ts_value = (
-                        int(raw_ts.timestamp() * 1000)
-                        if hasattr(raw_ts, "timestamp")
-                        else 0
-                    )
-
-                    messages.append(
-                        {
-                            "id": row[0],
-                            "timestamp": ts_value,
-                            "role": "ai" if row[2] == "assistant" else "user",
-                            "content": row[3],
-                            "thinking": row[4],
-                        }
-                    )
-                return messages
-        except Exception as e:
-            logger.error(f"Failed to fetch history: {e}")
-            return []
-
-    def _store_loop(self):
-        while True:
-            content = self.store_queue.get()
-            data = content["data"]
-            database_name = content.get("database", "message_list")
-            try:
-                self._ensure_connection()
-                if not self.conn:
-                    logger.warning("DB connection unavailable, retrying later...")
-                    self.store_queue.put(content)
-                    threading.Event().wait(1)
-                    continue
-
-                with self.conn.cursor() as cur:
-                    if database_name == "state_list":
-                        cur.execute(
-                            """
-                            INSERT INTO state_list (text, timestamp) 
-                            VALUES (%s, %s);
-                        """,
-                            (data["text"], data["timestamp"]),
-                        )
-                    else:
-                        cur.execute(
-                            """
-                            INSERT INTO message_list (sender, text, thinking, timestamp) 
-                            VALUES (%s, %s, %s, %s);
-                        """,
-                            (
-                                data["sender"],
-                                data["text"],
-                                data["thinking"],
-                                data["timestamp"],
-                            ),
-                        )
-                    self.conn.commit()
-            except Exception as e:
-                logger.error(f"Failed to store message: {e}")
-                if self.conn:
-                    self.conn.rollback()
+        thought, speech = separate_thought_and_speech(event.data['text'])
+        timestamp = event.data.get('timestamp', int(self.event_bus.logical_now * 1000))
+        self._enqueue('message_list', {'sender': 'assistant', 'text': speech, 'thinking': thought,
+            'timestamp': self.event_bus.format_logical_time(timestamp / 1000),
+            'message_id': event.data.get('message_id', str(uuid.uuid4()))})
 
     def _on_state_update(self, event: Event):
-        data = {
-            "text": json.dumps(event.data["new_state"], ensure_ascii=False),
-            "timestamp": self.event_bus.formatted_logical_now,
-        }
-        content = {"data": data, "database": "state_list"}
-        self.store_queue.put(content)
+        self._enqueue('state_list', {'text': json.dumps(event.data['new_state'], ensure_ascii=False),
+            'timestamp': event.data['new_state'].get('对应时间', self.event_bus.formatted_logical_now)})
+
+    def start(self):
+        self.worker_thread = threading.Thread(target=self._store_loop, daemon=True)
+        self.worker_thread.start()
+
+    def get_history(self, limit=20, before_timestamp=None, before_id=None):
+        from core.time_utils import to_epoch
+        try:
+            with connection() as conn, conn.cursor() as cur:
+                query = 'SELECT id,timestamp,sender,text,thinking,message_id FROM message_list'
+                args = []
+                if before_timestamp is not None:
+                    date = datetime.fromtimestamp(float(before_timestamp) / 1000, self.event_bus.timezone).replace(tzinfo=None)
+                    if before_id is not None:
+                        query += ' WHERE (timestamp,id) < (%s,%s)'
+                        args.extend([date, before_id])
+                    else:
+                        query += ' WHERE timestamp < %s'
+                        args.append(date)
+                query += ' ORDER BY timestamp DESC,id DESC LIMIT %s'
+                args.append(max(1, min(int(limit), 100)))
+                cur.execute(query, args)
+                rows = cur.fetchall()
+            self.ready = True
+            return [{'id': row[0], 'timestamp': int(to_epoch(row[1]) * 1000),
+                'role': 'ai' if row[2] == 'assistant' else 'user', 'content': row[3] or '',
+                'thinking': row[4] or '', 'message_id': row[5] or f'legacy-{row[0]}'} for row in rows]
+        except Exception as exc:
+            self.ready, self.last_error = False, str(exc)
+            logger.error('Failed to fetch history: %s', exc)
+            raise RuntimeError('聊天记录数据库不可用，请检查后端日志') from exc
+
+    def _write(self, entry):
+        data = entry['data']
+        with connection() as conn, conn.cursor() as cur:
+            if entry['database'] == 'state_list':
+                cur.execute('INSERT INTO state_list(text,timestamp,message_id) VALUES(%s,%s,%s) ON CONFLICT(message_id) DO NOTHING',
+                    (data['text'], data['timestamp'], data['message_id']))
+            elif entry['database'] == 'message_list':
+                cur.execute('INSERT INTO message_list(sender,text,thinking,timestamp,message_id) VALUES(%s,%s,%s,%s,%s) ON CONFLICT(message_id) DO NOTHING',
+                    (data['sender'],data['text'],data['thinking'],data['timestamp'],data['message_id']))
+            else:
+                raise ValueError('Unsupported persistence table')
+
+    def _store_loop(self):
+        while not self._stop.is_set():
+            try:
+                entry = self.store_queue.get(timeout=0.2)
+            except Empty:
+                continue
+            key = entry['data']['message_id']
+            try:
+                for attempt in range(self.MAX_ATTEMPTS):
+                    try:
+                        if not self.ready:
+                            self._init_db()
+                        self._write(entry)
+                        (self.spool_dir / (key + '.json')).unlink(missing_ok=True)
+                        self.ready, self.last_error = True, None
+                        break
+                    except Exception as exc:
+                        self.ready, self.last_error = False, str(exc)
+                        logger.error('Database write failed (%s/%s): %s', attempt + 1, self.MAX_ATTEMPTS, exc)
+                        if self._stop.wait(min(2 ** attempt, 5)):
+                            break
+            finally:
+                with self._pending_lock:
+                    self._pending.discard(key)
+                self.store_queue.task_done()
+
+    def flush(self, timeout=30):
+        deadline = time.monotonic() + timeout
+        while self.store_queue.unfinished_tasks and time.monotonic() < deadline:
+            time.sleep(0.02)
+        return not self.store_queue.unfinished_tasks and not any(self.spool_dir.glob('*.json'))
+
+    def stop(self):
+        self._stop.set()
+        self.worker_thread.join(timeout=6)

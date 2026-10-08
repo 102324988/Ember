@@ -9,22 +9,41 @@ from config.settings import settings
 from core.event_bus import EventBus, Event
 from brain.llm_client import LLMClient
 import threading
+import uuid
+from pathlib import Path
+from functools import wraps
 from queue import Queue
 from concurrent.futures import ThreadPoolExecutor
+from memory.postgres import initialize_episodic
 
 
 logger = logging.getLogger(__name__)
+
+
+def serialized(method):
+    @wraps(method)
+    def wrapped(self, *args, **kwargs):
+        with self._db_lock:
+            return method(self, *args, **kwargs)
+    return wrapped
 
 
 class EpisodicMemory:
     def __init__(self, event_bus: EventBus):
         self.event_bus = event_bus
         self.conn = None
+        self.ready = False
+        self.last_error = None
+        self._db_lock = threading.RLock()
         self._ensure_connection()
         self._init_db()
 
         self.store_queue = Queue()
+        self.spool_dir = Path('data/failed_memories')
+        self.spool_dir.mkdir(parents=True, exist_ok=True)
         self.llm_client = LLMClient()
+        for file in self.spool_dir.glob('*.json'):
+            self.store_queue.put({'type': 'store', 'data': json.loads(file.read_text(encoding='utf-8'))})
 
         self.worker_thread = threading.Thread(target=self._worker_loop, daemon=True)
         self.worker_thread.start()
@@ -44,10 +63,15 @@ class EpisodicMemory:
                     port=settings.PG_PORT,
                     connect_timeout=5,
                 )
-                register_vector(self.conn)
+                initialize_episodic(self.conn)
+                self.conn.commit()
+                self.ready, self.last_error = True, None
                 logger.debug("EpisodicMemory connected to PostgreSQL.")
         except Exception as e:
             logger.error(f"PostgreSQL connection failed: {e}")
+            self.ready, self.last_error = False, str(e)
+            if self.conn:
+                self.conn.close()
             self.conn = None
 
     def _init_db(self):
@@ -99,6 +123,11 @@ class EpisodicMemory:
                 self.conn.rollback()
 
     def _on_store_request(self, event: Event):
+        event.data.setdefault('memory_id', str(uuid.uuid4()))
+        file = self.spool_dir / (event.data['memory_id'] + '.json')
+        temp = file.with_suffix('.tmp')
+        temp.write_text(json.dumps(event.data, ensure_ascii=False), encoding='utf-8')
+        temp.replace(file)
         self.store_queue.put({"type": "store", "data": event.data})
 
     def _worker_loop(self):
@@ -112,14 +141,24 @@ class EpisodicMemory:
                 continue
 
             if task is None:
+                self.store_queue.task_done()
                 break
 
             try:
                 if task["type"] == "store":
-                    self._async_store_process(task["data"])
+                    for attempt in range(3):
+                        try:
+                            self._async_store_process(task['data'])
+                            (self.spool_dir / (task['data']['memory_id'] + '.json')).unlink(missing_ok=True)
+                            break
+                        except Exception:
+                            if attempt == 2:
+                                raise
+                            time.sleep(1)
                 elif task["type"] == "update_access":
                     self._execute_update_access(task["id"])
             except Exception as e:
+                self.ready, self.last_error = False, str(e)
                 logger.error(f"Error in EpisodicMemory worker loop: {e}")
             finally:
                 try:
@@ -127,6 +166,7 @@ class EpisodicMemory:
                 except:
                     pass
 
+    @serialized
     def _async_store_process(self, event_data):
         content = event_data.get("content", "")
         insight = event_data.get("insight", "")
@@ -134,24 +174,29 @@ class EpisodicMemory:
         try:
             embedding = self.llm_client.get_embedding(settings.EMBEDDING_MODEL, content)
             insight_embedding = self.llm_client.get_embedding(
-                settings.EMBEDDING_MODEL, insight
+                settings.EMBEDDING_MODEL, insight or content
             )
 
             if embedding is None or insight_embedding is None:
                 logger.warning(
                     "Failed to get embeddings from LLM, skipping memory store."
                 )
-                return
+                raise ValueError('长期记忆向量生成失败，已保留待重试数据')
 
-            event_data["embedding"] = embedding
-            event_data["insight_embedding"] = insight_embedding
+            event_data["embedding"] = np.asarray(embedding, dtype=np.float32)
+            event_data["insight_embedding"] = np.asarray(insight_embedding, dtype=np.float32)
 
             self._ensure_connection()
             if self.conn:
                 self._add_memory(event_data)
+                self.ready, self.last_error = True, None
+            else:
+                raise RuntimeError('长期记忆数据库不可用')
         except Exception as e:
             logger.error(f"Failed to process memory store request: {e}")
+            raise
 
+    @serialized
     def _on_query_request(self, event: Event):
         query = event.data.get("query", "")
         key_words = event.data.get("key_words", [])
@@ -192,6 +237,7 @@ class EpisodicMemory:
         for m_id in seen_ids:
             self.store_queue.put({"type": "update_access", "id": m_id})
 
+    @serialized
     def _execute_update_access(self, event_id):
         self._ensure_connection()
         if not self.conn:
@@ -214,6 +260,7 @@ class EpisodicMemory:
             if self.conn:
                 self.conn.rollback()
 
+    @serialized
     def _sleep_memory_process(self, event: Event):
         self._ensure_connection()
         if not self.conn:
@@ -243,8 +290,9 @@ class EpisodicMemory:
             with self.conn.cursor() as cur:
                 cur.execute(
                     """
-                    INSERT INTO episodic_memory (content, embedding, insight, insight_embedding, importance, confidence, metadata, time, last_accessed, clarity)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    INSERT INTO episodic_memory (content, embedding, insight, insight_embedding, importance, confidence, metadata, time, last_accessed, clarity, memory_id)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT(memory_id) DO NOTHING
                     """,
                     (
                         event_data.get("content", ""),
@@ -257,6 +305,7 @@ class EpisodicMemory:
                         event_data.get("time"),
                         event_data.get("time"),
                         event_data.get("importance", 1.0),
+                        event_data.get('memory_id'),
                     ),
                 )
                 self.conn.commit()
@@ -264,6 +313,7 @@ class EpisodicMemory:
             logger.error(f"Failed to add memory to DB: {e}")
             if self.conn:
                 self.conn.rollback()
+            raise
 
     def _query_by_similarity(self, query_vector):
         try:
@@ -314,6 +364,7 @@ class EpisodicMemory:
     def _query_by_keywords(self, keywords: list):
         if not keywords:
             return []
+
         try:
             with self.conn.cursor() as cur:
                 cur.execute(
@@ -360,3 +411,9 @@ class EpisodicMemory:
             if self.conn:
                 self.conn.rollback()
             return []
+
+    def stop(self):
+        self.store_queue.put(None)
+        self.worker_thread.join(timeout=10)
+        if not self.worker_thread.is_alive() and self.conn:
+            self.conn.close()

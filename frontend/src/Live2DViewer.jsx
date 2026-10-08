@@ -7,11 +7,17 @@ import { LIVE2D_CONFIG } from './live2dConfig';
 window.PIXI = PIXI;
 Live2DModel.registerTicker(PIXI.Ticker);
 
-const Live2DViewer = ({ currentEmotion, audio, modelPath }) => {
+const Live2DViewer = ({ currentEmotion, audio, modelPath, onTouch }) => {
     const canvasRef = useRef(null);
     const appRef = useRef(null);
     const modelRef = useRef(null);
     const [modelLoaded, setModelLoaded] = useState(false);
+    
+    // Refs for touch logic
+    const onTouchRef = useRef(onTouch);
+    const lastTouchTimeRef = useRef(0);
+
+    useEffect(() => { onTouchRef.current = onTouch; }, [onTouch]);
 
     // 音频分析相关
     const analyserRef = useRef(null);
@@ -279,6 +285,64 @@ const Live2DViewer = ({ currentEmotion, audio, modelPath }) => {
         };
     }, [modelLoaded]);
 
+    // 新增：触摸交互（全局事件监听）
+    useEffect(() => {
+        if (!modelLoaded || !modelRef.current || !LIVE2D_CONFIG.touchInteraction?.enabled) return;
+
+        const onContextMenu = (e) => {
+            const canvas = canvasRef.current;
+            if (!canvas) return;
+
+            // 获取点击的全局坐标
+            const clientX = e.clientX;
+            const clientY = e.clientY;
+
+            // 获取 canvas 在屏幕上的可视矩形
+            const rect = canvas.getBoundingClientRect();
+
+            // 检查点击是否落在 canvas 的矩形范围内
+            if (
+                clientX >= rect.left &&
+                clientX <= rect.right &&
+                clientY >= rect.top &&
+                clientY <= rect.bottom
+            ) {
+                // 阻止默认右键菜单弹出
+                e.preventDefault();
+
+                // 冷却防抖检查 (防止用户狂点导致 LLM 崩溃)
+                const now = Date.now();
+                const cooldownMs = LIVE2D_CONFIG.touchInteraction?.cooldownMs || 3000;
+                if (now - lastTouchTimeRef.current < cooldownMs) {
+                    console.log("Live2D Touch: Cooldown active, ignoring touch.");
+                    return;
+                }
+                lastTouchTimeRef.current = now;
+
+                // 计算相对画布的 Y 坐标百分比 (0 ~ 1)
+                const relativeY = (clientY - rect.top) / rect.height;
+
+                const { headRatio, expressions } = LIVE2D_CONFIG.touchInteraction;
+
+                // 判断点击区域
+                if (relativeY <= headRatio) {
+                    // 摸头
+                    console.log("Live2D Touch: Head");
+                    if (onTouchRef.current) onTouchRef.current('head');
+                } else {
+                    // 摸身体
+                    console.log("Live2D Touch: Body");
+                    if (onTouchRef.current) onTouchRef.current('body');
+                }
+            }
+        };
+
+        window.addEventListener('contextmenu', onContextMenu);
+
+        return () => {
+            window.removeEventListener('contextmenu', onContextMenu);
+        };
+    }, [modelLoaded]);
 
     return (
         <canvas

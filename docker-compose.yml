@@ -3,11 +3,11 @@ services:
     image: pgvector/pgvector:pg16
     container_name: ember2-postgres
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5433:5432"
     environment:
-      POSTGRES_DB: ember_db
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: your_password
+      POSTGRES_DB: ${PG_DB:-ember_db}
+      POSTGRES_USER: ${PG_USER:-postgres}
+      POSTGRES_PASSWORD: ${PG_PASSWORD:?Set PG_PASSWORD in .env}
     volumes:
       - ./data/db/postgres_data:/var/lib/postgresql/data
     restart: always

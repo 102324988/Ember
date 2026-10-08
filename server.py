@@ -3,7 +3,8 @@ import asyncio
 import time
 import logging
 import os
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+import uuid
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -126,6 +127,15 @@ class EmberServer:
         async def startup_event():
             self.loop = asyncio.get_running_loop()
             logger.info(f">>> [DEBUG] Asyncio loop initialized: {self.loop}")
+            await asyncio.to_thread(self.state_manager.prepare_startup)
+            self.heartbeat.start()
+
+        @self.app.on_event('shutdown')
+        async def shutdown_event():
+            self.event_bus.paused = True
+            await asyncio.to_thread(self.heartbeat.stop)
+            await asyncio.to_thread(self.db_memory.flush)
+            self.db_memory.stop()
 
         # Mount audio directory
         audio_dir = "data/audio"
@@ -139,8 +149,16 @@ class EmberServer:
                 "display_name": settings.CHARACTER_NAME,
                 "state": self.state_manager.current_state,
                 "logical_time": self.event_bus.formatted_logical_now,
-                "is_thinking": self.state_manager.is_thinking,
+                "is_thinking": self.state_manager.is_thinking or self.brain._is_processing or self.event_bus.pending_dialogues > 0,
                 "time_accel_factor": self.event_bus.time_accel_factor,
+                "timezone": settings.TIMEZONE,
+                "status": {
+                    "database": {"ready": self.db_memory.ready, "pending_writes": len(list(self.db_memory.spool_dir.glob('*.json')))},
+                    "long_term_memory": {"ready": self.episodic_memory.ready},
+                    "scene": {"ready": self.state_manager.ready, "state": self.state_manager.current_state.get('scene_status'), "error": self.state_manager.last_error},
+                    "paused": self.event_bus.paused,
+                    "configuration_warnings": settings.CONFIG_WARNINGS,
+                },
             }
 
         class TimeAccelRequest(BaseModel):
@@ -163,12 +181,12 @@ class EmberServer:
                 raise HTTPException(status_code=500, detail="设置时间加速因子失败")
 
         @self.app.get("/history")
-        async def get_history(limit: int = 20, before: int = None):
+        async def get_history(limit: int = Query(20, ge=1, le=100), before: int = None, before_id: int = None):
             try:
-                return self.db_memory.get_history(limit=limit, before_timestamp=before)
+                return await asyncio.to_thread(self.db_memory.get_history, limit, before, before_id)
             except Exception as e:
                 logger.error(f"Failed to fetch history: {e}")
-                return []
+                raise HTTPException(status_code=503, detail="聊天记录数据库不可用，请重试或检查后端日志") from e
 
         # ==================== 存档 API ====================
 
@@ -313,7 +331,22 @@ class EmberServer:
 
                     user_input = message.get("content")
                     if user_input:
+                        if self.event_bus.paused or not self.state_manager.ready:
+                            await websocket.send_json({'type': 'error', 'content': '系统正在准备场景或存读档，请稍后重试'})
+                            continue
+                        if message.get('format') == 'audio':
+                            await websocket.send_json({'type': 'error', 'content': '语音识别尚未启用'})
+                            continue
                         ts = int(self.event_bus.logical_now * 1000)
+                        message_id = str(uuid.uuid4())
+                        with self.event_bus.pending_condition:
+                            accepted = not self.event_bus.paused
+                            if accepted:
+                                self.event_bus.publish(Event(name='user.input', data={
+                                    'text': user_input, 'message_id': message_id, 'timestamp': ts}))
+                        if not accepted:
+                            await websocket.send_json({'type': 'error', 'content': '系统正在存读档，请稍后重试'})
+                            continue
                         await self.manager.broadcast(
                             {
                                 "type": "message",
@@ -321,10 +354,8 @@ class EmberServer:
                                 "content": user_input,
                                 "timestamp": ts,
                                 "id": ts,
+                                "message_id": message_id,
                             }
-                        )
-                        self.event_bus.publish(
-                            Event(name="user.input", data={"text": user_input})
                         )
             except WebSocketDisconnect:
                 self.manager.disconnect(websocket)
@@ -347,7 +378,7 @@ class EmberServer:
         )
 
     def _on_ai_start_internal(self, event):
-        self.current_ai_msg_id = int(self.event_bus.logical_now * 1000)
+        self.current_ai_msg_id = event.data['message_id']
         self.current_full_text = ""
         self.safe_broadcast(
             {
@@ -355,8 +386,9 @@ class EmberServer:
                 "sender": "ai",
                 "content": "",
                 "mode": "start",
-                "timestamp": self.current_ai_msg_id,
+                "timestamp": event.data['timestamp'],
                 "id": self.current_ai_msg_id,
+                "message_id": self.current_ai_msg_id,
             }
         )
 
@@ -371,19 +403,25 @@ class EmberServer:
                     "content": chunk,
                     "mode": "append",
                     "id": self.current_ai_msg_id,
+                    "message_id": self.current_ai_msg_id,
                 }
             )
 
     def _on_ai_finished_internal(self, event):
+        self.current_full_text = event.data['text']
+        self.safe_broadcast({'type': 'message', 'sender': 'ai', 'mode': 'replace',
+            'content': self.current_full_text, 'id': event.data['message_id'],
+            'message_id': event.data['message_id'], 'timestamp': event.data['timestamp']})
         logger.info(
             f"LLM 完成输出，准备合成 TTS... (内容长度: {len(self.current_full_text)})"
         )
         if self.current_full_text and self.current_full_text.strip():
             # 只有开启了某种自动逻辑或当前处于 AI 回复流中才自动合成
             if self.loop:
+                final_text = self.current_full_text
                 self.loop.call_soon_threadsafe(
                     lambda: asyncio.create_task(
-                        self._process_tts(self.current_full_text)
+                        self._process_tts(final_text)
                     )
                 )
 
@@ -427,7 +465,6 @@ class EmberServer:
                 logger.error(f"safe_broadcast 失败: {e}")
 
     def start(self):
-        self.heartbeat.start()
         import uvicorn
 
         logger.info(">>> Ember Server starting...")

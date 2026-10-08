@@ -11,6 +11,7 @@ from typing import List, Optional
 
 from archive.importers.base import BaseImporter, ImportResult
 from config.settings import settings
+from memory.postgres import initialize_history, initialize_episodic, sync_sequence
 
 logger = logging.getLogger(__name__)
 
@@ -108,12 +109,18 @@ class PostgresImporter(BaseImporter):
         """导入 PostgreSQL 数据"""
         try:
             conn = self._get_connection()
+            initialize_history(conn)
+            initialize_episodic(conn)
+            conn.commit()
             imported_tables = []
             failed_tables = []
             stats = {"tables_count": 0, "total_rows": 0, "indexes_rebuilt": 0}
 
             try:
                 # 先清空所有表（无论存档中是否有数据文件）
+                for required in ('message_list', 'state_list'):
+                    if not (Path(self.source_dir) / f'{required}.sql').exists():
+                        raise ValueError(f'存档缺少必要数据表: {required}')
                 self._clear_all_tables(conn)
 
                 for table in self.TABLES:
@@ -121,6 +128,8 @@ class PostgresImporter(BaseImporter):
                     if sql_file.exists():
                         result = self._import_table(conn, table, sql_file)
                         if result["success"]:
+                            sync_sequence(conn, table)
+                            conn.commit()
                             imported_tables.append(table)
                             stats["tables_count"] += 1
                             stats["total_rows"] += result.get("rows", 0)
@@ -131,13 +140,17 @@ class PostgresImporter(BaseImporter):
 
                 # 重建向量索引
                 index_result = self._rebuild_vector_indexes(conn)
+                initialize_history(conn)
+                for table in self.TABLES:
+                    sync_sequence(conn, table)
+                conn.commit()
                 stats["indexes_rebuilt"] = index_result.get("count", 0)
 
                 conn.close()
 
                 if failed_tables:
                     return ImportResult(
-                        success=True,
+                        success=False,
                         message=f"已导入 {len(imported_tables)} 个表，{len(failed_tables)} 个失败",
                         data={"imported": imported_tables, "failed": failed_tables},
                         stats=stats,
@@ -219,21 +232,15 @@ class PostgresImporter(BaseImporter):
             # 读取 SQL 文件
             with open(sql_file, "r", encoding="utf-8") as f:
                 sql_content = f.read()
+            self._legacy_escapes = sql_content.startswith('-- Table:') and '-- String encoding: standard_conforming_strings' not in sql_content
 
-            # 尝试使用 COPY 命令 (更快)
-            if self._try_copy_import(conn, cursor, table_name, sql_content):
-                cursor.execute(f"SELECT count(*) FROM {table_name}")
-                row_count = cursor.fetchone()[0]
-                cursor.close()
-                self.logger.info(f"已导入表 (COPY): {table_name}, 共 {row_count} 行")
-                return {"success": True, "rows": row_count}
-
-            # COPY 不可用，使用批量 INSERT
+            # Parse quoted SQL literals without lossy CSV conversion.
             row_count = self._batch_insert(cursor, table_name, sql_content)
 
             # 即使没有数据也要提交事务
             conn.commit()
-
+            sync_sequence(conn, table_name)
+            conn.commit()
             cursor.close()
             self.logger.info(f"已导入表 (批量INSERT): {table_name}, 共 {row_count} 行")
             return {"success": True, "rows": row_count}
@@ -291,18 +298,39 @@ class PostgresImporter(BaseImporter):
         """从 INSERT 语句中提取列名"""
         import re
 
-        match = re.search(r"INSERT INTO \w+ \(([^)]+)\)", sql_content, re.IGNORECASE)
+        match = re.search(r'INSERT\s+INTO\s+(?:public\.)?"?\w+"?\s*\(([^)]+)\)', sql_content, re.IGNORECASE)
         if match:
-            return [col.strip() for col in match.group(1).split(",")]
+            return [col.strip().strip('"') for col in match.group(1).split(",")]
         return []
 
     def _extract_values_from_sql(self, sql_content: str) -> list:
         """从 INSERT 语句中提取值列表"""
         import re
 
-        pattern = r"INSERT INTO \w+ \([^)]+\) VALUES \(([^)]+)\);"
-        matches = re.findall(pattern, sql_content, re.IGNORECASE)
-        return matches
+        pattern = r'INSERT\s+INTO\s+(?:public\.)?"?\w+"?\s*\([^)]+\)\s*VALUES\s*\('
+        values = []
+        for match in re.finditer(pattern, sql_content, re.IGNORECASE):
+            start = index = match.end()
+            quoted, depth = False, 1
+            while index < len(sql_content):
+                char = sql_content[index]
+                if char == "'":
+                    if quoted and index + 1 < len(sql_content) and sql_content[index + 1] == "'":
+                        index += 2
+                        continue
+                    quoted = not quoted
+                elif not quoted:
+                    if char == '(':
+                        depth += 1
+                    elif char == ')':
+                        depth -= 1
+                        if depth == 0:
+                            values.append(sql_content[start:index])
+                            break
+                index += 1
+            else:
+                raise ValueError('存档包含未闭合的 SQL 值')
+        return values
 
     def _sql_values_to_csv_row(self, values_str: str, columns: list) -> str:
         """将 SQL VALUES 转换为 CSV 行"""
@@ -352,23 +380,24 @@ class PostgresImporter(BaseImporter):
         import re
 
         # 提取所有 INSERT 语句
-        pattern = r"INSERT INTO (\w+) \(([^)]+)\) VALUES \(([^)]+)\);"
-        matches = re.findall(pattern, sql_content, re.IGNORECASE)
+        matches = self._extract_values_from_sql(sql_content)
 
         if not matches:
             # 没有数据需要导入，返回 0
             self.logger.debug(f"表 {table_name} 没有 INSERT 语句，跳过导入")
             return 0
 
-        columns = [col.strip() for col in matches[0][1].split(",")]
-        columns_str = ", ".join(columns)
+        from psycopg2 import sql
+        columns = self._extract_columns_from_sql(sql_content)
+        columns_str = sql.SQL(',').join(map(sql.Identifier, columns))
         placeholders = ", ".join(["%s"] * len(columns))
 
         # 批量收集值
         all_values = []
         for match in matches:
-            values_str = match[2]
-            values = self._parse_values(values_str)
+            values = self._parse_values(match)
+            if len(values) != len(columns):
+                raise ValueError('存档列与值数量不匹配')
             all_values.append(values)
 
         # 批量插入
@@ -377,7 +406,7 @@ class PostgresImporter(BaseImporter):
             batch = all_values[i : i + self.BATCH_INSERT_SIZE]
             for values in batch:
                 cursor.execute(
-                    f"INSERT INTO {table_name} ({columns_str}) VALUES ({placeholders})",
+                    sql.SQL('INSERT INTO {} ({}) VALUES ({})').format(sql.Identifier(table_name), columns_str, sql.SQL(placeholders)),
                     values,
                 )
                 inserted += 1
@@ -416,7 +445,12 @@ class PostgresImporter(BaseImporter):
         if val.upper() == "NULL":
             return None
         if val.startswith("'") and val.endswith("'"):
-            return val[1:-1].replace("''", "'")
+            text = val[1:-1].replace("''", "'")
+            if getattr(self, '_legacy_escapes', False):
+                import re
+                escapes = {'n': '\n', 'r': '\r', 't': '\t', '\\': '\\', '0': '\0', 'Z': '\x1a'}
+                text = re.sub(r'\\([nrt\\0Z])', lambda m: escapes[m.group(1)], text)
+            return text
         try:
             if "." in val:
                 return float(val)
@@ -564,6 +598,7 @@ class PostgresImporter(BaseImporter):
             # 清空原表并恢复数据
             cursor.execute(f"TRUNCATE TABLE {table_name};")
             cursor.execute(f"INSERT INTO {table_name} SELECT * FROM {backup_table};")
+            sync_sequence(conn, table_name)
 
             conn.commit()
             cursor.close()

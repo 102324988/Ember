@@ -122,7 +122,8 @@ class PostgresExporter(BaseExporter):
                 self.logger.warning(f"部分表导出失败: {failed_tables}")
 
             return ExportResult(
-                success=len(exported_tables) > 0,
+                success=len(exported_tables) == len(self.TABLES) and not failed_tables,
+                error=str(failed_tables) if failed_tables else None,
                 data={"exported": exported_tables, "failed": failed_tables},
                 stats=stats,
             )
@@ -264,6 +265,7 @@ class PostgresExporter(BaseExporter):
             # 分批导出
             with open(output_file, "w", encoding="utf-8") as f:
                 f.write(f"-- Table: {table_name}\n")
+                f.write('-- String encoding: standard_conforming_strings\n')
                 f.write(f"-- Rows: {total_rows}\n")
                 f.write(f"-- Columns: {', '.join(columns)}\n\n")
 
@@ -369,13 +371,7 @@ class PostgresExporter(BaseExporter):
 
         # 替换特殊字符
         result = s
-        result = result.replace("\\", "\\\\")  # 反斜杠
         result = result.replace("'", "''")  # 单引号 (SQL标准)
-        result = result.replace("\0", "\\0")  # NULL字符
-        result = result.replace("\n", "\\n")  # 换行符
-        result = result.replace("\r", "\\r")  # 回车符
-        result = result.replace("\t", "\\t")  # 制表符
-        result = result.replace("\x1a", "\\Z")  # Ctrl+Z
 
         return result
 

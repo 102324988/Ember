@@ -2,7 +2,11 @@
 # 系统 & 开坑计划
 # =========================
 .env
+.env.*
+!.env.example
 arrangement.txt
+/generated_prompt.md
+/benchmark_report_*.md
 
 # =========================
 # Python & 虚拟环境
@@ -26,30 +30,62 @@ ENV/
 pip-log.txt
 pip-delete-this-directory.txt
 
+# 测试、分析缓存与构建产物
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+build/
+dist/
+node_modules/
+
 # =========================
 # 项目运行时产生的数据 & 数据库
 # =========================
 data/logs/
+data/backups/
+data/failed_writes/
+data/failed_memories/
 data/cache/
 data/db/
 data/state/
 data/vector_store/
-data/archives/*
-!data/archives/default.ember
+data/audio/
+data/files/
+data/notes/
+data/archives/
 
 *.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
 *.sqlite3
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite3-journal
+*.sqlite3-wal
+*.sqlite3-shm
 chroma_db/
 
 # =========================
 # 配置文件中的记录/缓存
 # =========================
 config/chat_history.log
+config/chat_history.json
 config/chat_memory.json
 config/state.json
 config/state.json.bak
 config/chat_history.json.bak
 config/chat_memory.json.bak
+config/state.tmp
+config/chat_history.tmp
+config/chat_memory.tmp
+*.log
 
 # =========================
 # IDE & 操作系统配置

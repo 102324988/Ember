@@ -7,6 +7,7 @@ from core.event_bus import EventBus, Event
 from config.settings import settings
 from brain.llm_client import LLMClient
 from memory.neo4j_memory import Neo4jGraphMemory
+from memory.postgres import initialize_episodic
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +48,8 @@ class EntityExtractionMemory:
                     port=settings.PG_PORT,
                     connect_timeout=5,
                 )
-                register_vector(self.conn)
+                initialize_episodic(self.conn)
+                self.conn.commit()
                 logger.debug("EntityExtractionMemory connected to PostgreSQL.")
         except Exception as e:
             logger.error(f"PostgreSQL connection failed: {e}")
@@ -66,6 +68,12 @@ class EntityExtractionMemory:
         threading.Thread(target=self.consolidate_all_memories, daemon=True).start()
 
     def consolidate_all_memories(self) -> dict:
+        with self.event_bus.operation_lock:
+            if self.event_bus.paused:
+                return {"batches": 0, "nodes": 0, "edges": 0}
+            return self._consolidate_all_memories()
+
+    def _consolidate_all_memories(self) -> dict:
         """整理全部记忆 - 从 episodic_memory 读取并批量处理
 
         Returns:
@@ -107,8 +115,9 @@ class EntityExtractionMemory:
                 total_nodes += result["nodes"]
                 total_edges += result["edges"]
 
-                # 标记本批次记忆为已整理
-                self._mark_memories_consolidated(batch_ids)
+                # A failed extraction must remain retryable.
+                if result['nodes'] or result['edges']:
+                    self._mark_memories_consolidated(batch_ids)
 
                 logger.info(
                     f"批次 {batch_count} 完成: {result['nodes']} 节点, {result['edges']} 边"

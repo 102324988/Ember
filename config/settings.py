@@ -5,6 +5,7 @@ import yaml
 import time
 import logging
 import json
+import math
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +48,7 @@ class Settings:
         PROMPTS = {}
 
     STATE = {}
+    STATE_IS_DEFAULT = False
     if os.path.exists("./config/state.json"):
         with open("./config/state.json", "r", encoding="utf-8") as f:
             try:
@@ -55,13 +57,12 @@ class Settings:
                 STATE = {}
 
     if not STATE and os.path.exists("./config/state_default.json"):
+        STATE_IS_DEFAULT = True
         with open("./config/state_default.json", "r", encoding="utf-8") as f:
             try:
                 STATE = json.load(f)
             except json.JSONDecodeError:
                 STATE = {}
-        with open("./config/state.json", "w", encoding="utf-8") as f:
-            json.dump(STATE, f, ensure_ascii=False, indent=2)
 
     logger.info(f"Loaded state: {STATE}")
 
@@ -73,29 +74,31 @@ class Settings:
     TOOL_USAGE_GUIDELINES = PROMPTS.get("tool_usage_guidelines", "")
 
     TIME_ACCEL_FACTOR = float(os.getenv("TIME_ACCEL_FACTOR", "1.0"))
+    if not math.isfinite(TIME_ACCEL_FACTOR) or TIME_ACCEL_FACTOR <= 0:
+        raise ValueError('TIME_ACCEL_FACTOR 必须是有限的正数')
+    TIMEZONE = os.getenv("TIMEZONE", "Asia/Shanghai")
+    CONFIG_WARNINGS = []
 
-    # 空闲超时时间：配置值为真实世界秒数，内部乘以加速因子转换为系统时间
-    STATE_IDLE_MIN_TIMEOUT = int(os.getenv("STATE_IDLE_MIN_TIMEOUT", "30")) * int(TIME_ACCEL_FACTOR)
-    STATE_IDLE_MAX_TIMEOUT = int(os.getenv("STATE_IDLE_MAX_TIMEOUT", "3600")) * int(TIME_ACCEL_FACTOR)
+    # 空闲超时使用真实秒数，动态加速不改变等待间隔。
+    STATE_IDLE_MIN_TIMEOUT = float(os.getenv("STATE_IDLE_MIN_TIMEOUT", "30"))
+    STATE_IDLE_MAX_TIMEOUT = float(os.getenv("STATE_IDLE_MAX_TIMEOUT", "3600"))
 
     IDLE_STATE_UPDATE_PROMPT = PROMPTS.get("idle_state_update_prompt", "")
     IDLE_SPEAKING_UPDATE_PROMPT = PROMPTS.get("idle_speaking_update_prompt", "")
     STATE_UPDATE_INTERVAL = int(
         os.getenv("STATE_UPDATE_INTERVAL", "1")
     )  # 每几轮对话更新一次状态
-    START_TIME = os.getenv(
-        "START_TIME",
-        time.time(),
-    )
+    START_TIME = os.getenv("START_TIME", "").strip()
+    if START_TIME.startswith("#"):
+        CONFIG_WARNINGS.append("START_TIME 只有注释，已按当前现实时间启动")
+        START_TIME = ""
     if START_TIME == "?":
-        with open("./config/state.json", "r", encoding="utf-8") as f:
-            state_data = json.load(f)
-        START_TIME = state_data.get("对应时间", time.time())
+        START_TIME = STATE.get("对应时间", "")
 
     CONTEXT_WINDOW_SIZE = int(os.getenv("CONTEXT_WINDOW_SIZE", "20"))
 
-    PG_HOST = os.getenv("PG_HOST", "localhost")
-    PG_PORT = int(os.getenv("PG_PORT", "5432"))
+    PG_HOST = os.getenv("PG_HOST", "127.0.0.1")
+    PG_PORT = int(os.getenv("PG_PORT", "5433"))
     PG_USER = os.getenv("PG_USER", "postgres")
     PG_PASSWORD = os.getenv("PG_PASSWORD", "your_password")
     PG_DB = os.getenv("PG_DB", "ember_db")
