@@ -8,7 +8,9 @@ import logging
 from memory.memory_process import Hippocampus
 import json
 import uuid
-from brain.tag_utils import validate_and_fix_llm_output
+import re
+from brain.tag_utils import validate_and_fix_llm_output, extract_thought_and_speech
+from core.turns import TurnCancelled, TERMINAL
 from tools.processor import ToolCallProcessor
 
 logger = logging.getLogger(__name__)
@@ -53,44 +55,59 @@ class Brain:
         with self.event_bus.pending_condition:
             if self.event_bus.paused:
                 return
+            turn = self.event_bus.turns.begin(event.data.get('timestamp', int(self.event_bus.logical_now * 1000)),
+                event.data.get('turn_id') or event.data.get('message_id'))
+            event.data['turn_id'] = turn.id
             self.event_bus.pending_dialogues += 1
+        self.event_bus.publish(Event('turn.started', turn.snapshot()))
         thread = threading.Thread(target=self._accepted_dialogue, args=(user_msg, event.data), daemon=True)
         thread.start()
 
     def _accepted_dialogue(self, text, metadata):
+        turn = self.event_bus.turns.current
         try:
             self.process_dialogue(text, metadata, _accepted=True)
         finally:
             with self.event_bus.pending_condition:
                 self.event_bus.pending_dialogues -= 1
                 self.event_bus.pending_condition.notify_all()
+            self._emit_turn_finished(turn)
 
     def _on_idle_speak(self, event: Event):
         def _speak():
             with self.event_bus.operation_lock:
-                if self.event_bus.paused:
-                    return
-                self._is_processing = True
+                with self.event_bus.pending_condition:
+                    if self.event_bus.paused or self.event_bus.pending_dialogues:
+                        return
+                    turn = self.event_bus.turns.begin(int(self.event_bus.logical_now * 1000), source='proactive')
+                    self._is_processing = True
+                self.event_bus.publish(Event('turn.started', turn.snapshot()))
                 try:
                     self.memory.update_base_prompt(self.tool_processor.build_system_prompt_with_tools(settings.SYSTEM_PROMPT))
-                    self._llm_speak(self.memory, pack=True, proactive=True)
+                    self._llm_speak(self.memory, pack=True, proactive=True, turn=turn)
                 finally:
                     self._is_processing = False
+                    self._emit_turn_finished(turn)
 
         thread = threading.Thread(target=_speak)
         thread.start()
 
     def process_dialogue(self, user_message, metadata=None, _accepted=False):
+        turn = None
         with self.event_bus.operation_lock:
             if self.event_bus.paused and not _accepted:
                 return
-            return self._process_dialogue(user_message, metadata or {})
+            turn = self._process_dialogue(user_message, metadata or {})
+        if not _accepted:
+            self._emit_turn_finished(turn)
 
     def _process_dialogue(self, user_message, metadata):
         # 防止并发处理
         if self._is_processing:
             logger.warning("正在处理中，忽略新输入")
             return
+        turn = self.event_bus.turns.begin(metadata.get('timestamp', int(self.event_bus.logical_now * 1000)),
+            metadata.get('turn_id') or metadata.get('message_id'))
 
         try:
             self._is_processing = True
@@ -98,7 +115,9 @@ class Brain:
             self.memory.add_message("user", user_message,
                 timestamp=metadata.get('timestamp', int(self.event_bus.logical_now * 1000)),
                 message_id=metadata.get('message_id', str(uuid.uuid4())))
+            turn.check()
             self.state_manager.prepare_dialogue(user_message)
+            turn.check()
 
             # 异步更新 base_prompt（不阻塞 LLM 调用）
             # 注：实际注入到消息中是在 _llm_speak 中完成的
@@ -106,15 +125,84 @@ class Brain:
                 self.tool_processor.build_system_prompt_with_tools(settings.SYSTEM_PROMPT)
             )
 
-            self._llm_speak(self.memory, pack=True)
+            self._llm_speak(self.memory, pack=True, turn=turn)
+            # Test doubles and silent responses must also release the turn.
+            if turn.status not in TERMINAL:
+                turn.finish('completed')
+        except TurnCancelled:
+            self._finish_incomplete(turn, 'interrupted')
+        except Exception:
+            if not turn.cancelled.is_set():
+                logger.exception('Dialogue preparation failed')
+            self._finish_incomplete(turn, 'interrupted' if turn.cancelled.is_set() else 'failed')
         finally:
             self._is_processing = False
+        return turn
 
-    def _llm_speak(self, memory, pack: bool = False, memories: str = "", proactive=False):
+    def _emit_turn_finished(self, turn):
+        if turn and turn.status in TERMINAL:
+            turn.release()
+            self.event_bus.publish(Event('turn.finished', turn.snapshot()))
+
+    def _finish_incomplete(self, turn, status):
+        if not turn.finish(status):
+            return
+        raw = self.tool_processor.remove_tool_calls(turn.partial)
+        raw = re.sub(r'<tool_call>[\s\S]*$', '', raw, flags=re.IGNORECASE)
+        _, speech = extract_thought_and_speech(raw)
+        speech = re.sub(r'</?response>', '', speech, flags=re.IGNORECASE).strip()
+        if speech:
+            try:
+                self.memory.add_message('assistant', speech, timestamp=turn.timestamp,
+                    message_id=turn.message_id, completion_status='interrupted')
+            except Exception:
+                logger.exception('Could not save interrupted short-term message')
+        self.event_bus.publish(Event('llm.interrupted', {'text': speech, 'message_id': turn.message_id,
+            'timestamp': turn.timestamp, 'turn_id': turn.id, 'completion_status': 'interrupted'}))
+
+    def _stream_reply(self, messages, turn):
+        turn.check()
+        stream = self.llm_client.stream_chat(model_config=settings.LARGE_LLM, messages=messages, cancel_token=turn)
+        try:
+            for chunk in stream:
+                turn.check()
+                turn.partial += chunk
+                yield chunk
+            turn.check()
+        finally:
+            if hasattr(stream, 'close'):
+                stream.close()
+
+    def _reset_reply(self, turn):
+        turn.check()
+        turn.partial = ''
+        self.event_bus.publish(Event('llm.chunk', {'text': '', 'reset': True, 'turn_id': turn.id}))
+
+    def _llm_speak(self, memory, pack: bool = False, memories: str = "", proactive=False, turn=None):
+        own_turn = turn is None
+        turn = turn or self.event_bus.turns.begin(int(self.event_bus.logical_now * 1000), source='proactive' if proactive else 'dialogue')
+        try:
+            self._generate_reply(memory, pack, memories, proactive, turn)
+            if turn.status not in TERMINAL:
+                turn.finish('completed')
+        except TurnCancelled:
+            self._finish_incomplete(turn, 'interrupted')
+        except Exception:
+            if not turn.cancelled.is_set():
+                logger.exception('Reply generation failed')
+            self._finish_incomplete(turn, 'interrupted' if turn.cancelled.is_set() else 'failed')
+        finally:
+            if own_turn:
+                self._emit_turn_finished(turn)
+
+    def _generate_reply(self, memory, pack, memories, proactive, turn):
         # 立即发布 llm.started 事件，让前端尽早显示"正在思考"
-        message_id = str(uuid.uuid4())
-        timestamp = int(self.event_bus.logical_now * 1000)
-        self.event_bus.publish(Event(name="llm.started", data={'message_id': message_id, 'timestamp': timestamp}))
+        turn.check()
+        turn.set_phase('generating')
+        turn.timestamp = int(self.event_bus.logical_now * 1000)
+        message_id = turn.message_id
+        timestamp = turn.timestamp
+        self.event_bus.publish(Event(name="llm.started", data={'message_id': message_id, 'timestamp': timestamp, 'turn_id': turn.id}))
 
         # 在锁外准备数据，减少锁持有时间
         with self.lock:
@@ -130,6 +218,8 @@ class Brain:
                 role_label = (
                     "对方" if msg["role"] == "user" else f"{settings.CHARACTER_NAME}"
                 )
+                if msg.get('completion_status') == 'interrupted':
+                    role_label += '（已中断的未完成片段，不是完整承诺）'
                 when = self.event_bus.format_logical_time(msg['timestamp'] / 1000) if msg.get('timestamp') else '时间未知，仅为历史背景'
                 history_parts.append(f"[{when}] {role_label}: {msg['content']}\n")
             formatted_history = "".join(history_parts)
@@ -158,25 +248,20 @@ class Brain:
         max_chunks = 10000
 
         try:
-            stream_gen = self.llm_client.stream_chat(
-                model_config=settings.LARGE_LLM,
-                messages=messages,
-            )
+            stream_gen = self._stream_reply(messages, turn)
 
             for chunk in stream_gen:
                 chunk_count += 1
                 if chunk_count > max_chunks:
                     logger.warning("LLM 输出超过最大限制，截断")
-                    break
+                    turn.partial = full_content
+                    raise RuntimeError('Reply exceeded the generation limit')
 
                 full_content += chunk
-                self.event_bus.publish(Event(name="llm.chunk", data={"text": chunk}))
+                self.event_bus.publish(Event(name="llm.chunk", data={"text": chunk, 'turn_id': turn.id}))
 
-        except Exception as e:
-            logger.error(f"LLM 流式调用失败: {e}")
-            error_msg = "[系统: AI 响应出现问题，请稍后再试]"
-            self.event_bus.publish(Event(name="llm.chunk", data={"text": error_msg}))
-            full_content = error_msg
+        except Exception:
+            raise
 
         if full_content:
             # 多轮工具调用处理
@@ -198,9 +283,12 @@ class Brain:
                 )
 
                 # 执行工具调用（带调用来源标识）
+                turn.check()
+                turn.set_phase('tools')
                 tool_results = self.tool_processor.execute_tool_calls(
-                    tool_calls, caller=f"Brain._llm_speak[iter{iteration}]"
+                    tool_calls, caller=f"Brain._llm_speak[iter{iteration}]", cancel_check=turn.check
                 )
+                turn.check()
 
                 # 格式化工具结果
                 tool_results_text = self.tool_processor.format_tool_results_for_prompt(
@@ -236,24 +324,24 @@ class Brain:
                     # 再次调用 LLM 生成回复
                     try:
                         follow_up_content = ""
-                        stream_gen = self.llm_client.stream_chat(
-                            model_config=settings.LARGE_LLM,
-                            messages=current_messages,
-                        )
+                        self._reset_reply(turn)
+                        turn.set_phase('generating')
+                        stream_gen = self._stream_reply(current_messages, turn)
 
                         for chunk in stream_gen:
                             chunk_count += 1
                             follow_up_content += chunk
                             self.event_bus.publish(
-                                Event(name="llm.chunk", data={"text": chunk})
+                                Event(name="llm.chunk", data={"text": chunk, 'turn_id': turn.id})
                             )
 
                         full_content = follow_up_content
 
+                    except TurnCancelled:
+                        raise
                     except Exception as e:
                         logger.error(f"LLM 工具后续调用失败: {e}")
-                        full_content = clean_content
-                        break
+                        raise
                 else:
                     full_content = clean_content
                     break
@@ -281,19 +369,19 @@ class Brain:
 
                 try:
                     retry_content = ""
-                    stream_gen = self.llm_client.stream_chat(
-                        model_config=settings.LARGE_LLM,
-                        messages=retry_messages,
-                    )
+                    self._reset_reply(turn)
+                    stream_gen = self._stream_reply(retry_messages, turn)
                     for chunk in stream_gen:
                         retry_content += chunk
                         self.event_bus.publish(
-                            Event(name="llm.chunk", data={"text": chunk})
+                            Event(name="llm.chunk", data={"text": chunk, 'turn_id': turn.id})
                         )
                     full_content = retry_content
+                except TurnCancelled:
+                    raise
                 except Exception as e:
                     logger.error(f"LLM 重试生成失败: {e}")
-                    break
+                    raise
 
             # 最终仍有工具标签，强制清理
             if self.tool_processor.has_tool_calls(full_content):
@@ -304,6 +392,7 @@ class Brain:
             full_content = validate_and_fix_llm_output(full_content)
 
             logger.info(f"LLM回复: {full_content[:100]}...")
+            turn.finish('completed')
 
             try:
                 self.memory.add_message("assistant", full_content, timestamp=timestamp, message_id=message_id)
@@ -311,5 +400,5 @@ class Brain:
                 logger.error(f"保存消息失败: {e}")
 
             self.event_bus.publish(
-                Event(name="llm.finished", data={"text": full_content, 'message_id': message_id, 'timestamp': timestamp})
+                Event(name="llm.finished", data={"text": full_content, 'message_id': message_id, 'timestamp': timestamp, 'turn_id': turn.id})
             )

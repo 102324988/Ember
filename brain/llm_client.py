@@ -4,6 +4,7 @@ import json
 import threading
 from json_repair import repair_json
 from config.settings import settings
+from core.turns import TurnCancelled
 
 logger = logging.getLogger(__name__)
 
@@ -170,7 +171,7 @@ class LLMClient:
                     return None
         return None
 
-    def stream_chat(self, model_config, messages, call_type: str = "dialogue"):
+    def stream_chat(self, model_config, messages, call_type: str = "dialogue", cancel_token=None):
         """流式对话
 
         call_type: 用于区分调用来源，默认 dialogue（对话类调用）
@@ -181,7 +182,10 @@ class LLMClient:
             else self.small_client
         )
 
+        response = None
         try:
+            if cancel_token:
+                cancel_token.check()
             response = client.chat.completions.create(
                 model=model_config.name,
                 messages=messages,
@@ -189,10 +193,15 @@ class LLMClient:
                 stream=True,
                 stream_options={"include_usage": True},
                 temperature=settings.LLM_TEMPERATURE,
+                timeout=60,
             )
+            if cancel_token and hasattr(response, 'close'):
+                cancel_token.attach_stream(response.close)
 
             last_usage = None
             for chunk in response:
+                if cancel_token:
+                    cancel_token.check()
                 if getattr(chunk, "usage", None):
                     last_usage = chunk.usage
 
@@ -208,6 +217,8 @@ class LLMClient:
                 if content is not None:
                     yield content
 
+            if cancel_token:
+                cancel_token.check()
             usage = (
                 last_usage
                 or getattr(response, "usage", None)
@@ -215,9 +226,19 @@ class LLMClient:
             )
             self._log_usage(usage, model_config.name, call_type)
 
+        except TurnCancelled:
+            raise
         except Exception as e:
+            if cancel_token:
+                cancel_token.check()
+                raise
             yield f"[Error]: {str(e)}"
             logger.error(f"Streaming Chat Error: {e}")
+        finally:
+            if cancel_token:
+                cancel_token.detach_stream()
+            if response is not None and hasattr(response, 'close'):
+                response.close()
 
     def get_embedding(self, model_config, text: str):
         client = self.embedding_client

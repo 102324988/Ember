@@ -7,6 +7,7 @@ from datetime import datetime
 from core.time_utils import get_timezone, to_epoch
 from typing import Callable, Any, Dict, List
 from config.settings import settings
+from core.turns import TurnCoordinator
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +28,7 @@ class EventBus:
         self.paused = False
         self.pending_condition = threading.Condition()
         self.pending_dialogues = 0
+        self.turns = TurnCoordinator()
         self.timezone = get_timezone()
         self._init_time()
 

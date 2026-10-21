@@ -150,7 +150,7 @@ class ToolCallProcessor:
         return text.strip()
 
     def execute_tool_calls(
-        self, calls: List[dict], caller: str = "unknown"
+        self, calls: List[dict], caller: str = "unknown", cancel_check=None
     ) -> List[dict]:
         """
         并行执行工具调用列表
@@ -184,6 +184,8 @@ class ToolCallProcessor:
             # 提交所有任务
             future_to_call = {}
             for call in calls:
+                if cancel_check:
+                    cancel_check()
                 future = executor.submit(
                     self.tool_executor.execute, call["name"], call["parameters"]
                 )

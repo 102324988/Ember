@@ -7,17 +7,14 @@ import { LIVE2D_CONFIG } from './live2dConfig';
 window.PIXI = PIXI;
 Live2DModel.registerTicker(PIXI.Ticker);
 
-const Live2DViewer = ({ currentEmotion, audio, modelPath, onTouch }) => {
+const Live2DViewer = ({ currentEmotion, audio, modelPath }) => {
+    const containerRef = useRef(null);
     const canvasRef = useRef(null);
     const appRef = useRef(null);
     const modelRef = useRef(null);
     const [modelLoaded, setModelLoaded] = useState(false);
-    
-    // Refs for touch logic
-    const onTouchRef = useRef(onTouch);
-    const lastTouchTimeRef = useRef(0);
-
-    useEffect(() => { onTouchRef.current = onTouch; }, [onTouch]);
+    const [modelError, setModelError] = useState(false);
+    const [loadAttempt, setLoadAttempt] = useState(0);
 
     // 音频分析相关
     const analyserRef = useRef(null);
@@ -35,10 +32,11 @@ const Live2DViewer = ({ currentEmotion, audio, modelPath, onTouch }) => {
         // 初始化 AudioContext
         if (!audioContextRef.current) {
             const AudioContext = window.AudioContext || window.webkitAudioContext;
+            if (!AudioContext) return;
             audioContextRef.current = new AudioContext();
         }
         const context = audioContextRef.current;
-        if (context.state === 'suspended') context.resume();
+        if (context.state === 'suspended') context.resume().catch(() => {});
 
         // 创建分析器
         if (!analyserRef.current) {
@@ -53,7 +51,7 @@ const Live2DViewer = ({ currentEmotion, audio, modelPath, onTouch }) => {
             source = context.createMediaElementSource(audio);
             source.connect(analyser);
             analyser.connect(context.destination);
-        } catch (e) {
+        } catch {
             // 已连接则忽略
         }
 
@@ -149,14 +147,12 @@ const Live2DViewer = ({ currentEmotion, audio, modelPath, onTouch }) => {
 
         return () => {
             ticker.remove(updateMouth);
+            source?.disconnect();
+            analyser.disconnect();
             const coreModel = modelRef.current?.internalModel?.coreModel;
             if (coreModel) {
-                setTimeout(() => {
-                    if (modelRef.current?.internalModel?.coreModel) {
-                        modelRef.current.internalModel.coreModel.setParameterValueById('ParamMouthOpenY', 0);
-                        modelRef.current.internalModel.coreModel.setParameterValueById('ParamMouthForm', 0);
-                    }
-                }, 150);
+                coreModel.setParameterValueById('ParamMouthOpenY', 0);
+                coreModel.setParameterValueById('ParamMouthForm', 0);
             }
             lastValueRef.current = 0;
             lastFormRef.current = 0;
@@ -166,13 +162,20 @@ const Live2DViewer = ({ currentEmotion, audio, modelPath, onTouch }) => {
     useEffect(() => {
         if (!canvasRef.current) return;
         if (appRef.current) return;
+        let resizeObserver;
+        let disposed = false;
+        const canvas = canvasRef.current;
+        const contextLost = event => { event.preventDefault(); setModelLoaded(false); setModelError(true); };
+        canvas.addEventListener('webglcontextlost', contextLost);
 
         const init = async () => {
             try {
                 const app = new PIXI.Application({
                     view: canvasRef.current,
-                    width: LIVE2D_CONFIG.canvas.width,
-                    height: LIVE2D_CONFIG.canvas.height,
+                    width: Math.max(1, containerRef.current.clientWidth),
+                    height: Math.max(1, containerRef.current.clientHeight),
+                    resolution: Math.min(window.devicePixelRatio || 1, 2),
+                    autoDensity: true,
                     transparent: LIVE2D_CONFIG.pixi.transparent,
                     autoStart: LIVE2D_CONFIG.pixi.autoStart,
                 });
@@ -183,7 +186,7 @@ const Live2DViewer = ({ currentEmotion, audio, modelPath, onTouch }) => {
                     autoInteract: false
                 });
 
-                if (!appRef.current || appRef.current !== app) {
+                if (disposed || !appRef.current || appRef.current !== app) {
                     model.destroy();
                     return;
                 }
@@ -192,35 +195,45 @@ const Live2DViewer = ({ currentEmotion, audio, modelPath, onTouch }) => {
                 app.stage.addChild(model);
 
                 model.anchor.set(LIVE2D_CONFIG.model.anchor.x, LIVE2D_CONFIG.model.anchor.y);
-                model.x = app.renderer.width / 2;
-                model.y = app.renderer.height / 2;
-
-                const scaleX = app.renderer.width / model.width;
-                const scaleY = app.renderer.height / model.height;
-                model.scale.set(Math.min(scaleX, scaleY) * LIVE2D_CONFIG.model.scale);
+                const naturalWidth = model.width;
+                const naturalHeight = model.height;
+                const fit = () => {
+                    if (disposed || !containerRef.current) return;
+                    const width = Math.max(1, containerRef.current.clientWidth);
+                    const height = Math.max(1, containerRef.current.clientHeight);
+                    app.renderer.resize(width, height);
+                    model.x = width / 2;
+                    model.y = height / 2;
+                    model.scale.set(Math.min(width / naturalWidth, height / naturalHeight) * LIVE2D_CONFIG.model.scale);
+                };
+                fit();
+                resizeObserver = new ResizeObserver(fit);
+                resizeObserver.observe(containerRef.current);
 
                 console.log("Live2D Model Loaded");
                 setModelLoaded(true);
 
-                if (currentEmotion && model.expression) {
-                    model.expression(currentEmotion);
-                }
-
             } catch (error) {
                 console.error("Failed to load Live2D model:", error);
+                if (!disposed) setModelError(true);
             }
         };
 
         init();
 
         return () => {
+            disposed = true;
+            canvas.removeEventListener('webglcontextlost', contextLost);
+            resizeObserver?.disconnect();
             if (appRef.current) {
                 appRef.current.destroy(false, { children: true });
                 appRef.current = null;
                 modelRef.current = null;
             }
         };
-    }, [modelPath]);
+    }, [modelPath, loadAttempt]);
+
+    useEffect(() => () => { audioContextRef.current?.close().catch(() => {}); }, []);
 
     useEffect(() => {
         if (modelLoaded && modelRef.current && currentEmotion) {
@@ -234,7 +247,8 @@ const Live2DViewer = ({ currentEmotion, audio, modelPath, onTouch }) => {
 
     // 鼠标追踪 —— 头部、眼球、身体跟随鼠标
     useEffect(() => {
-        if (!modelLoaded || !modelRef.current || !LIVE2D_CONFIG.mouseTracking?.enabled) return;
+        if (!modelLoaded || !modelRef.current || !LIVE2D_CONFIG.mouseTracking?.enabled
+            || window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
 
         const { smoothing, headAngleRange, bodyAngleRange, bodyFactor } = LIVE2D_CONFIG.mouseTracking;
 
@@ -244,8 +258,10 @@ const Live2DViewer = ({ currentEmotion, audio, modelPath, onTouch }) => {
         const current = { angleX: 0, angleY: 0, eyeX: 0, eyeY: 0, bodyX: 0 };
 
         const onMouseMove = (e) => {
-            mousePos.x = (e.clientX / window.innerWidth) * 2 - 1;   // -1（左）~ 1（右）
-            mousePos.y = (e.clientY / window.innerHeight) * 2 - 1;  // -1（上）~ 1（下）
+            const rect = containerRef.current?.getBoundingClientRect();
+            if (!rect) return;
+            mousePos.x = Math.max(-1, Math.min(1, (e.clientX - rect.left) / rect.width * 2 - 1));
+            mousePos.y = Math.max(-1, Math.min(1, (e.clientY - rect.top) / rect.height * 2 - 1));
         };
 
         window.addEventListener('mousemove', onMouseMove);
@@ -285,71 +301,18 @@ const Live2DViewer = ({ currentEmotion, audio, modelPath, onTouch }) => {
         };
     }, [modelLoaded]);
 
-    // 新增：触摸交互（全局事件监听）
-    useEffect(() => {
-        if (!modelLoaded || !modelRef.current || !LIVE2D_CONFIG.touchInteraction?.enabled) return;
-
-        const onContextMenu = (e) => {
-            const canvas = canvasRef.current;
-            if (!canvas) return;
-
-            // 获取点击的全局坐标
-            const clientX = e.clientX;
-            const clientY = e.clientY;
-
-            // 获取 canvas 在屏幕上的可视矩形
-            const rect = canvas.getBoundingClientRect();
-
-            // 检查点击是否落在 canvas 的矩形范围内
-            if (
-                clientX >= rect.left &&
-                clientX <= rect.right &&
-                clientY >= rect.top &&
-                clientY <= rect.bottom
-            ) {
-                // 阻止默认右键菜单弹出
-                e.preventDefault();
-
-                // 冷却防抖检查 (防止用户狂点导致 LLM 崩溃)
-                const now = Date.now();
-                const cooldownMs = LIVE2D_CONFIG.touchInteraction?.cooldownMs || 3000;
-                if (now - lastTouchTimeRef.current < cooldownMs) {
-                    console.log("Live2D Touch: Cooldown active, ignoring touch.");
-                    return;
-                }
-                lastTouchTimeRef.current = now;
-
-                // 计算相对画布的 Y 坐标百分比 (0 ~ 1)
-                const relativeY = (clientY - rect.top) / rect.height;
-
-                const { headRatio, expressions } = LIVE2D_CONFIG.touchInteraction;
-
-                // 判断点击区域
-                if (relativeY <= headRatio) {
-                    // 摸头
-                    console.log("Live2D Touch: Head");
-                    if (onTouchRef.current) onTouchRef.current('head');
-                } else {
-                    // 摸身体
-                    console.log("Live2D Touch: Body");
-                    if (onTouchRef.current) onTouchRef.current('body');
-                }
-            }
-        };
-
-        window.addEventListener('contextmenu', onContextMenu);
-
-        return () => {
-            window.removeEventListener('contextmenu', onContextMenu);
-        };
-    }, [modelLoaded]);
-
     return (
+        <div ref={containerRef} className="live2d-viewer" aria-label="角色展示" data-renderer-state={modelError ? 'failed' : modelLoaded ? 'ready' : 'loading'}>
         <canvas
             id={LIVE2D_CONFIG.canvas.id}
             ref={canvasRef}
-            style={LIVE2D_CONFIG.canvas.style}
+            aria-hidden="true"
         />
+        {(!modelLoaded || modelError) && <div className="model-fallback" role="status"><span className="model-initial" aria-hidden="true">E</span>
+            <p>{modelError ? '角色暂时无法显示，文字对话仍可使用。' : '正在准备角色…'}</p>
+            {modelError && <button onClick={() => { setModelError(false); setModelLoaded(false); setLoadAttempt(value => value + 1); }}>重新加载角色</button>}
+        </div>}
+        </div>
     );
 };
 

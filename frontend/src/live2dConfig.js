@@ -9,10 +9,9 @@ export const LIVE2D_CONFIG = {
         height: 1800,
         id: 'live2d-canvas',
         style: {
-            position: 'fixed',
-            bottom: 0,
-            right: 0,
-            zIndex: 1,
+            position: 'absolute',
+            width: '100%',
+            height: '100%',
             pointerEvents: 'none'
         }
     },
@@ -56,8 +55,8 @@ export const LIVE2D_CONFIG = {
     },
     // 触摸交互配置 —— 模拟头部与身体的点击响应（基于屏幕相对坐标）
     touchInteraction: {
-        enabled: true,
-        headRatio: 0.33,       // 上半部分 33% 区域视为头部
+        enabled: false,       // 模型未提供 HitAreas；使用显式对话动作
+        headRatio: 0.33,
         cooldownMs: 3000       // 防触发冷却时间（毫秒），避免频繁摸头触发大量回复
     }
 };

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import './ArchiveModal.css';
 
 import { API_BASE as BACKEND_URL, getJSON } from './api';
@@ -7,6 +7,7 @@ const API_BASE = `${BACKEND_URL}/api/archive`;
 function ArchiveModal({ isOpen, onClose }) {
     const [archives, setArchives] = useState([]);
     const [loading, setLoading] = useState(false);
+    const dialogRef = useRef(null);
     const [operation, setOperation] = useState(null); // 'saving' | 'loading' | 'deleting'
     const [progress, setProgress] = useState({ message: '', percent: 0 });
     const [showCreateForm, setShowCreateForm] = useState(false);
@@ -14,10 +15,13 @@ function ArchiveModal({ isOpen, onClose }) {
     const [newSlotDesc, setNewSlotDesc] = useState('');
     const [error, setError] = useState('');
     const [timeAccelFactor, setTimeAccelFactor] = useState(1.0);
+    const [timeAccelDraft, setTimeAccelDraft] = useState(1.0);
+    const [settingTime, setSettingTime] = useState(false);
 
     // 加载存档列表
     const loadArchives = async () => {
         try {
+            setLoading(true);
             const data = await getJSON(`${API_BASE}/list`);
             if (data.success) {
                 setArchives(data.archives || []);
@@ -25,6 +29,8 @@ function ArchiveModal({ isOpen, onClose }) {
         } catch (err) {
             console.error('加载存档列表失败:', err);
             setError('加载存档列表失败');
+        } finally {
+            setLoading(false);
         }
     };
 
@@ -34,6 +40,7 @@ function ArchiveModal({ isOpen, onClose }) {
             const data = await getJSON(`${BACKEND_URL}/config`);
             if (data.time_accel_factor !== undefined) {
                 setTimeAccelFactor(data.time_accel_factor);
+                setTimeAccelDraft(data.time_accel_factor);
             }
         } catch (err) {
             console.error('获取时间加速因子失败:', err);
@@ -42,23 +49,33 @@ function ArchiveModal({ isOpen, onClose }) {
 
     // 设置时间加速因子
     const handleTimeAccelChange = async (newFactor) => {
-        setTimeAccelFactor(newFactor);
+        setSettingTime(true);
         try {
-            await getJSON(`${BACKEND_URL}/config/time_accel`, {
+            const data = await getJSON(`${BACKEND_URL}/config/time_accel`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ factor: newFactor }),
             });
+            setTimeAccelFactor(data.time_accel_factor);
+            setTimeAccelDraft(data.time_accel_factor);
         } catch (err) {
             console.error('设置时间加速因子失败:', err);
+            setTimeAccelDraft(timeAccelFactor);
+            setError(`时间倍率未修改：${err.message}`);
+        } finally {
+            setSettingTime(false);
         }
     };
 
     useEffect(() => {
         if (isOpen) {
+            const dialog = dialogRef.current;
+            const previous = document.activeElement;
+            dialog.showModal();
             loadArchives();
             fetchTimeAccel();
             setError('');
+            return () => { dialog.close(); previous?.focus(); };
         }
     }, [isOpen]);
 
@@ -275,12 +292,14 @@ function ArchiveModal({ isOpen, onClose }) {
     );
 
     return (
-        <div className="archive-modal-overlay" onClick={onClose}>
+        <dialog ref={dialogRef} aria-label="存档管理" className="archive-modal-overlay"
+            onCancel={event => { event.preventDefault(); if (!operation) onClose(); }}
+            onClick={event => { if (event.target === event.currentTarget && !operation) onClose(); }}>
             <div className="archive-modal" onClick={e => e.stopPropagation()}>
                 {/* 标题栏 */}
                 <div className="archive-modal-header">
                     <h2>存档管理</h2>
-                    <button className="archive-close-btn" onClick={onClose}>
+                    <button className="archive-close-btn" aria-label="关闭存档管理" disabled={!!operation} onClick={onClose}>
                         <CloseIcon />
                     </button>
                 </div>
@@ -288,17 +307,19 @@ function ArchiveModal({ isOpen, onClose }) {
                 {/* 时间加速控制 */}
                 <div className="time-accel-section">
                     <div className="time-accel-header">
-                        <span className="time-accel-label">时间加速</span>
-                        <span className="time-accel-value">{timeAccelFactor}x</span>
+                        <label htmlFor="archive-time-accel" className="time-accel-label">世界时间倍率 · 当前 {timeAccelFactor}x</label>
+                        <span className="time-accel-value">预览 {timeAccelDraft}x</span>
                     </div>
                     <input
                         type="range"
+                        id="archive-time-accel"
                         className="time-accel-slider"
                         min="0.5"
                         max="20"
                         step="0.5"
-                        value={timeAccelFactor}
-                        onChange={(e) => handleTimeAccelChange(parseFloat(e.target.value))}
+                        value={timeAccelDraft}
+                        disabled={!!operation || settingTime}
+                        onChange={(e) => setTimeAccelDraft(parseFloat(e.target.value))}
                     />
                     <div className="time-accel-marks">
                         <span>0.5x</span>
@@ -307,6 +328,8 @@ function ArchiveModal({ isOpen, onClose }) {
                         <span>15x</span>
                         <span>20x</span>
                     </div>
+                    <button disabled={!!operation || settingTime || timeAccelDraft === timeAccelFactor}
+                        onClick={() => handleTimeAccelChange(timeAccelDraft)}>{settingTime ? '正在应用…' : '应用时间倍率'}</button>
                 </div>
 
                 {/* 错误提示 */}
@@ -373,9 +396,10 @@ function ArchiveModal({ isOpen, onClose }) {
                 {/* 存档列表 */}
                 <div className="archive-list">
                     <h3>存档列表 ({archives.length})</h3>
+                    {loading && <p role="status">正在加载存档列表…</p>}
                     {archives.length === 0 ? (
                         <div className="archive-empty">
-                            暂无存档，点击"新建存档"创建
+                            {loading ? '正在读取…' : error ? '未能读取存档，可关闭后重新打开以重试。' : '暂无存档，点击“新建存档”创建'}
                         </div>
                     ) : (
                         <div className="archive-gallery">
@@ -481,7 +505,7 @@ function ArchiveModal({ isOpen, onClose }) {
                     </button>
                 </div>
             </div>
-        </div>
+        </dialog>
     );
 }
 

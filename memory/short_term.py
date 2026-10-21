@@ -71,11 +71,11 @@ class ShortTermMemory:
 
         self._executor.submit(_log)
 
-    def add_message(self, role, content, timestamp=None, message_id=None):
+    def add_message(self, role, content, timestamp=None, message_id=None, completion_status='completed'):
         with self._lock:
-            self._add_message(role, content, timestamp, message_id)
+            self._add_message(role, content, timestamp, message_id, completion_status)
 
-    def _add_message(self, role, content, timestamp=None, message_id=None):
+    def _add_message(self, role, content, timestamp=None, message_id=None, completion_status='completed'):
         if role == "assistant":
             _, speech = separate_thought_and_speech(content)
             thought, _ = extract_thought_and_speech(content)
@@ -84,7 +84,7 @@ class ShortTermMemory:
             self._add_back(role, speech)
             self.async_log(
                 "./config/chat_history.log",
-                f"{role}: {speech}",
+                f"{role}{' [已中断，未完成片段]' if completion_status == 'interrupted' else ''}: {speech}",
             )
         else:
             self._add_back(role, content)
@@ -92,7 +92,7 @@ class ShortTermMemory:
                 "./config/chat_history.log",
                 f"{role}: {content}",
             )
-        self.memory[-1].update(timestamp=timestamp, message_id=message_id)
+        self.memory[-1].update(timestamp=timestamp, message_id=message_id, completion_status=completion_status)
         self._save_memory()
 
     def _save_memory(self):

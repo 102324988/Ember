@@ -39,6 +39,8 @@ def initialize_history(conn):
             id SERIAL PRIMARY KEY, timestamp TIMESTAMP DEFAULT NOW(), sender TEXT,
             text TEXT, thinking TEXT, message_id TEXT UNIQUE)""")
         cur.execute("ALTER TABLE message_list ADD COLUMN IF NOT EXISTS message_id TEXT")
+        cur.execute("ALTER TABLE message_list ADD COLUMN IF NOT EXISTS completion_status TEXT NOT NULL DEFAULT 'completed'")
+        cur.execute("ALTER TABLE message_list ADD COLUMN IF NOT EXISTS turn_id TEXT")
         cur.execute("UPDATE message_list SET message_id = 'legacy-' || id WHERE message_id IS NULL")
         cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS message_list_message_id_idx ON message_list(message_id)")
         cur.execute("""CREATE TABLE IF NOT EXISTS state_list (

@@ -35,6 +35,7 @@ class DBMemory:
         self._init_db()
         event_bus.subscribe('user.input', self._on_user_input)
         event_bus.subscribe('llm.finished', self._on_llm_finished)
+        event_bus.subscribe('llm.interrupted', self._on_llm_interrupted)
         event_bus.subscribe('state.update', self._on_state_update)
         self.retry_failed()
         self.start()
@@ -77,14 +78,19 @@ class DBMemory:
         event.data.setdefault('timestamp', int(self.event_bus.logical_now * 1000))
         self._enqueue('message_list', {'sender': 'user', 'text': event.data['text'],
             'thinking': '', 'timestamp': self.event_bus.format_logical_time(event.data['timestamp'] / 1000),
-            'message_id': event.data['message_id']})
+            'message_id': event.data['message_id'], 'turn_id': event.data.get('turn_id')})
 
     def _on_llm_finished(self, event: Event):
         thought, speech = separate_thought_and_speech(event.data['text'])
         timestamp = event.data.get('timestamp', int(self.event_bus.logical_now * 1000))
         self._enqueue('message_list', {'sender': 'assistant', 'text': speech, 'thinking': thought,
             'timestamp': self.event_bus.format_logical_time(timestamp / 1000),
-            'message_id': event.data.get('message_id', str(uuid.uuid4()))})
+            'message_id': event.data.get('message_id', str(uuid.uuid4())),
+            'completion_status': event.data.get('completion_status', 'completed'), 'turn_id': event.data.get('turn_id')})
+
+    def _on_llm_interrupted(self, event: Event):
+        if separate_thought_and_speech(event.data.get('text', ''))[1].strip():
+            self._on_llm_finished(event)
 
     def _on_state_update(self, event: Event):
         self._enqueue('state_list', {'text': json.dumps(event.data['new_state'], ensure_ascii=False),
@@ -98,7 +104,7 @@ class DBMemory:
         from core.time_utils import to_epoch
         try:
             with connection() as conn, conn.cursor() as cur:
-                query = 'SELECT id,timestamp,sender,text,thinking,message_id FROM message_list'
+                query = 'SELECT id,timestamp,sender,text,thinking,message_id,completion_status,turn_id FROM message_list'
                 args = []
                 if before_timestamp is not None:
                     date = datetime.fromtimestamp(float(before_timestamp) / 1000, self.event_bus.timezone).replace(tzinfo=None)
@@ -115,7 +121,8 @@ class DBMemory:
             self.ready = True
             return [{'id': row[0], 'timestamp': int(to_epoch(row[1]) * 1000),
                 'role': 'ai' if row[2] == 'assistant' else 'user', 'content': row[3] or '',
-                'thinking': row[4] or '', 'message_id': row[5] or f'legacy-{row[0]}'} for row in rows]
+                'thinking': row[4] or '', 'message_id': row[5] or f'legacy-{row[0]}',
+                'completion_status': row[6], 'turn_id': row[7]} for row in rows]
         except Exception as exc:
             self.ready, self.last_error = False, str(exc)
             logger.error('Failed to fetch history: %s', exc)
@@ -128,10 +135,28 @@ class DBMemory:
                 cur.execute('INSERT INTO state_list(text,timestamp,message_id) VALUES(%s,%s,%s) ON CONFLICT(message_id) DO NOTHING',
                     (data['text'], data['timestamp'], data['message_id']))
             elif entry['database'] == 'message_list':
-                cur.execute('INSERT INTO message_list(sender,text,thinking,timestamp,message_id) VALUES(%s,%s,%s,%s,%s) ON CONFLICT(message_id) DO NOTHING',
-                    (data['sender'],data['text'],data['thinking'],data['timestamp'],data['message_id']))
+                cur.execute('INSERT INTO message_list(sender,text,thinking,timestamp,message_id,completion_status,turn_id) VALUES(%s,%s,%s,%s,%s,%s,%s) ON CONFLICT(message_id) DO NOTHING',
+                    (data['sender'],data['text'],data['thinking'],data['timestamp'],data['message_id'],
+                     data.get('completion_status', 'completed'), data.get('turn_id')))
             else:
                 raise ValueError('Unsupported persistence table')
+
+    def get_message(self, message_id):
+        """Resolve an explicit retry after a server restart without replaying its dialogue."""
+        from core.time_utils import to_epoch
+        try:
+            pending = self.spool_dir / (message_id + '.json')
+            if pending.is_file():
+                entry = json.loads(pending.read_text(encoding='utf-8'))
+                data = entry['data']
+                if entry['database'] == 'message_list' and data['sender'] == 'user':
+                    return {'content': data['text'], 'timestamp': int(to_epoch(data['timestamp']) * 1000), 'message_id': data['message_id'], 'persisted': False}
+            with connection() as conn, conn.cursor() as cur:
+                cur.execute('SELECT text,timestamp,message_id FROM message_list WHERE message_id=%s AND sender=%s', (message_id, 'user'))
+                row = cur.fetchone()
+            return None if row is None else {'content': row[0], 'timestamp': int(to_epoch(row[1]) * 1000), 'message_id': row[2], 'persisted': True}
+        except Exception as exc:
+            raise RuntimeError('无法核对原消息') from exc
 
     def _store_loop(self):
         while not self._stop.is_set():
@@ -148,6 +173,8 @@ class DBMemory:
                         self._write(entry)
                         (self.spool_dir / (key + '.json')).unlink(missing_ok=True)
                         self.ready, self.last_error = True, None
+                        if entry['database'] == 'message_list':
+                            self.event_bus.publish(Event('message.persisted', {'message_id': key}))
                         break
                     except Exception as exc:
                         self.ready, self.last_error = False, str(exc)

@@ -4,6 +4,8 @@ import time
 import logging
 import os
 import uuid
+import re
+from collections import OrderedDict
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -13,7 +15,8 @@ from core.event_bus import EventBus, Event
 from core.heartbeat import Heartbeat
 from persona.state_manager import StateManager
 from brain.core import Brain
-from brain.tts import TTSManager
+from brain.tts import TTSManager, TTSGenerationError
+from brain.tag_utils import extract_thought_and_speech
 from memory.short_term import ShortTermMemory
 from config.settings import settings
 from memory.episodic_memory import EpisodicMemory
@@ -67,8 +70,10 @@ class EmberServer:
         self.manager = ConnectionManager()
         self.loop = None
         self.current_ai_msg_id = None  # Track ongoing AI message ID
+        self.current_ai_turn_id = None
         self.current_full_text = ""  # Track full text for TTS
         self._tts_semaphore = asyncio.Semaphore(3)  # 限制并发 TTS 数量为 3
+        self._accepted_inputs = OrderedDict()
 
         # Initialize components
         self.heartbeat = Heartbeat(self.event_bus, interval=settings.HEARTBEAT_INTERVAL)
@@ -152,6 +157,8 @@ class EmberServer:
                 "is_thinking": self.state_manager.is_thinking or self.brain._is_processing or self.event_bus.pending_dialogues > 0,
                 "time_accel_factor": self.event_bus.time_accel_factor,
                 "timezone": settings.TIMEZONE,
+                "capabilities": {"message_receipts": True, "correlated_audio": True, "cancel_turn": True},
+                "turn": self.event_bus.turns.snapshot(),
                 "status": {
                     "database": {"ready": self.db_memory.ready, "pending_writes": len(list(self.db_memory.spool_dir.glob('*.json')))},
                     "long_term_memory": {"ready": self.episodic_memory.ready},
@@ -320,32 +327,72 @@ class EmberServer:
                     # 处理心跳 pong
                     if msg_type == "pong":
                         continue
+                    if msg_type == 'cancel_turn':
+                        snapshot = self.event_bus.turns.cancel(message.get('turn_id'))
+                        if snapshot is None:
+                            await websocket.send_json({'type': 'error', 'action': 'cancel_turn',
+                                'content': '本轮已变化，请同步状态后重试', 'turn_id': message.get('turn_id')})
+                        elif snapshot['status'] in ('completed', 'interrupted', 'failed'):
+                            await websocket.send_json({'type': 'turn.finished' if snapshot['released'] else 'turn.stopping', **snapshot})
+                        else:
+                            await self.manager.broadcast({'type': 'turn.stopping', **snapshot})
+                        continue
 
                     # 严格拦截 TTS 请求，防止进入消息广播逻辑
                     if msg_type == "tts_request":
                         text = message.get("content")
                         if text:
                             logger.info(f"收到手动 TTS 请求: {text[:20]}...")
-                            asyncio.create_task(self._process_tts(text))
+                            asyncio.create_task(self._process_tts(text, target=websocket,
+                                message_id=message.get('message_id'), request_id=message.get('request_id')))
                         continue  # 必须 continue，跳过下方的 user_input 处理
 
                     user_input = message.get("content")
                     if user_input:
+                        request_id = message.get('client_request_id')
+                        if request_id:
+                            try:
+                                if str(uuid.UUID(request_id)) != request_id:
+                                    raise ValueError('Expected canonical UUID')
+                            except (ValueError, TypeError, AttributeError):
+                                await websocket.send_json({'type': 'error', 'content': '消息标识无效，请重新编辑后发送', 'client_request_id': request_id})
+                                continue
+                            previous = self._accepted_inputs.get(request_id)
+                            if previous is None and message.get('retry'):
+                                try:
+                                    previous = await asyncio.to_thread(self.db_memory.get_message, request_id)
+                                    previous = self._accepted_inputs.get(request_id) or previous
+                                except RuntimeError:
+                                    await websocket.send_json({'type': 'error', 'content': '暂时无法核对原消息，请恢复数据库后重试', 'client_request_id': request_id})
+                                    continue
+                            if previous:
+                                if previous['content'] != user_input:
+                                    await websocket.send_json({'type': 'error', 'content': '同一消息标识不能用于不同内容', 'client_request_id': request_id})
+                                else:
+                                    await websocket.send_json({**previous, 'type': 'message', 'sender': 'user',
+                                        'client_request_id': request_id, 'replayed': True, 'turn_snapshot': self.event_bus.turns.snapshot()})
+                                continue
                         if self.event_bus.paused or not self.state_manager.ready:
-                            await websocket.send_json({'type': 'error', 'content': '系统正在准备场景或存读档，请稍后重试'})
+                            await websocket.send_json({'type': 'error', 'content': '系统正在准备场景或存读档，请稍后重试', 'client_request_id': request_id})
                             continue
                         if message.get('format') == 'audio':
-                            await websocket.send_json({'type': 'error', 'content': '语音识别尚未启用'})
+                            await websocket.send_json({'type': 'error', 'content': '语音识别尚未启用', 'client_request_id': request_id})
                             continue
                         ts = int(self.event_bus.logical_now * 1000)
-                        message_id = str(uuid.uuid4())
+                        message_id = request_id or str(uuid.uuid4())
+                        receipt = {'content': user_input, 'timestamp': ts, 'id': ts, 'message_id': message_id, 'turn_id': message_id}
                         with self.event_bus.pending_condition:
-                            accepted = not self.event_bus.paused
+                            current_turn = self.event_bus.turns.snapshot()
+                            turn_released = current_turn is None or current_turn.get('released', False)
+                            accepted = not self.event_bus.paused and not self.event_bus.pending_dialogues and not self.brain._is_processing and turn_released
                             if accepted:
+                                self._accepted_inputs[message_id] = receipt
+                                if len(self._accepted_inputs) > 1024:
+                                    self._accepted_inputs.popitem(last=False)
                                 self.event_bus.publish(Event(name='user.input', data={
-                                    'text': user_input, 'message_id': message_id, 'timestamp': ts}))
+                                    'text': user_input, 'message_id': message_id, 'timestamp': ts, 'turn_id': message_id}))
                         if not accepted:
-                            await websocket.send_json({'type': 'error', 'content': '系统正在存读档，请稍后重试'})
+                            await websocket.send_json({'type': 'error', 'content': '当前任务尚未完成，请稍后重试', 'client_request_id': request_id})
                             continue
                         await self.manager.broadcast(
                             {
@@ -355,6 +402,8 @@ class EmberServer:
                                 "timestamp": ts,
                                 "id": ts,
                                 "message_id": message_id,
+                                "client_request_id": request_id,
+                                "turn_id": message_id,
                             }
                         )
             except WebSocketDisconnect:
@@ -367,6 +416,10 @@ class EmberServer:
                 self.manager.disconnect(websocket)
 
     def _setup_event_handlers(self):
+        self.event_bus.subscribe('turn.started', lambda e: self.safe_broadcast({'type': 'turn.started', **e.data}))
+        self.event_bus.subscribe('turn.finished', self._on_turn_finished_internal)
+        self.event_bus.subscribe('llm.interrupted', self._on_ai_interrupted_internal)
+        self.event_bus.subscribe('message.persisted', self._on_message_persisted_internal)
         self.event_bus.subscribe("llm.started", self._on_ai_start_internal)
         self.event_bus.subscribe("llm.chunk", self._on_ai_chunk_internal)
         self.event_bus.subscribe("llm.finished", self._on_ai_finished_internal)
@@ -377,8 +430,15 @@ class EmberServer:
             ),
         )
 
+    def _on_message_persisted_internal(self, event):
+        previous = self._accepted_inputs.get(event.data['message_id'])
+        if previous is not None:
+            previous['persisted'] = True
+        self.safe_broadcast({'type': 'message.persisted', **event.data})
+
     def _on_ai_start_internal(self, event):
         self.current_ai_msg_id = event.data['message_id']
+        self.current_ai_turn_id = event.data.get('turn_id')
         self.current_full_text = ""
         self.safe_broadcast(
             {
@@ -389,21 +449,28 @@ class EmberServer:
                 "timestamp": event.data['timestamp'],
                 "id": self.current_ai_msg_id,
                 "message_id": self.current_ai_msg_id,
+                "turn_id": self.current_ai_turn_id,
             }
         )
 
     def _on_ai_chunk_internal(self, event):
+        if event.data.get('turn_id') and event.data['turn_id'] != self.current_ai_turn_id:
+            return
         if self.current_ai_msg_id:
             chunk = event.data.get("text", "")
-            self.current_full_text += chunk
+            if event.data.get('reset'):
+                self.current_full_text = chunk
+            else:
+                self.current_full_text += chunk
             self.safe_broadcast(
                 {
                     "type": "message",
                     "sender": "ai",
                     "content": chunk,
-                    "mode": "append",
+                    "mode": "start" if event.data.get('reset') else "append",
                     "id": self.current_ai_msg_id,
                     "message_id": self.current_ai_msg_id,
+                    "turn_id": self.current_ai_turn_id,
                 }
             )
 
@@ -411,7 +478,8 @@ class EmberServer:
         self.current_full_text = event.data['text']
         self.safe_broadcast({'type': 'message', 'sender': 'ai', 'mode': 'replace',
             'content': self.current_full_text, 'id': event.data['message_id'],
-            'message_id': event.data['message_id'], 'timestamp': event.data['timestamp']})
+            'message_id': event.data['message_id'], 'timestamp': event.data['timestamp'],
+            'turn_id': event.data.get('turn_id'), 'completion_status': 'completed'})
         logger.info(
             f"LLM 完成输出，准备合成 TTS... (内容长度: {len(self.current_full_text)})"
         )
@@ -421,15 +489,38 @@ class EmberServer:
                 final_text = self.current_full_text
                 self.loop.call_soon_threadsafe(
                     lambda: asyncio.create_task(
-                        self._process_tts(final_text)
+                        self._process_tts(final_text, message_id=event.data['message_id'], turn_id=event.data.get('turn_id'))
                     )
                 )
 
-        self.safe_broadcast({"type": "llm.done"})
+        if not event.data.get('turn_id'):
+            self.safe_broadcast({"type": "llm.done", "message_id": event.data['message_id']})
 
-    async def _process_tts(self, text):
+    def _on_ai_interrupted_internal(self, event):
+        self.safe_broadcast({'type': 'message', 'sender': 'ai', 'mode': 'replace',
+            'content': event.data['text'], 'id': event.data['message_id'],
+            'message_id': event.data['message_id'], 'turn_id': event.data['turn_id'],
+            'timestamp': event.data['timestamp'], 'completion_status': 'interrupted'})
+
+    def _on_turn_finished_internal(self, event):
+        self.safe_broadcast({'type': 'turn.finished', **event.data})
+        self.safe_broadcast({'type': 'llm.done', **event.data})
+
+    async def _process_tts(self, text, *, target=None, message_id=None, request_id=None, turn_id=None):
         """处理 TTS，限制并发数量"""
+        async def report_error(code, content):
+            payload = {'type': 'tts_error', 'code': code, 'content': content,
+                'request_id': request_id, 'message_id': message_id, 'turn_id': turn_id}
+            if target is not None:
+                await self.manager._safe_send(target, json.dumps(payload, ensure_ascii=False))
+            else:
+                await self.manager.broadcast(payload)
+
+        _, text = extract_thought_and_speech(text or '')
+        text = re.sub(r'</?response>', '', text, flags=re.IGNORECASE).strip()
         if not text or not text.strip():
+            if target is not None:
+                await report_error('empty_text', '这条消息没有可朗读的对白')
             return
 
         # 使用信号量限制并发
@@ -442,12 +533,20 @@ class EmberServer:
                     logger.warning(f"TTS 文本过长，已截断至 {max_tts_length} 字符")
 
                 base64_audio = await self.tts_manager.generate_base64(text)
+                if not base64_audio:
+                    raise TTSGenerationError('no_audio', '语音服务未返回音频，请重试')
                 logger.info(f"广播 Base64 TTS 音频 (长度: {len(base64_audio)})")
-                await self.manager.broadcast(
-                    {"type": "audio", "audio_base64": base64_audio}
-                )
+                payload = {"type": "audio", "audio_base64": base64_audio, 'message_id': message_id, 'request_id': request_id, 'turn_id': turn_id}
+                if target is not None:
+                    await self.manager._safe_send(target, json.dumps(payload, ensure_ascii=False))
+                else:
+                    await self.manager.broadcast(payload)
+            except TTSGenerationError as e:
+                logger.warning('TTS 生成失败 [%s]: %s', e.code, e)
+                await report_error(e.code, str(e))
             except Exception as e:
-                logger.error(f"TTS 广播错误: {e}")
+                logger.error('TTS 处理失败 (%s)', type(e).__name__)
+                await report_error('generation_failed', '语音生成失败，请重试')
 
     def safe_broadcast(self, message: dict):
         """线程安全的广播方法"""

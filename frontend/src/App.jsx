@@ -1,889 +1,238 @@
-import React, { useState, useEffect, useRef } from 'react'
-import { Radar, RadarChart, PolarGrid, PolarAngleAxis, ResponsiveContainer } from 'recharts';
-import './App.css'
+import { useEffect, useRef, useState } from 'react';
+import './App.css';
 import Live2DViewer from './Live2DViewer';
 import ArchiveModal from './ArchiveModal';
-import { API_BASE, WS_URL, getJSON } from './api';
-import { mergeHistory, messageKey } from './messageHistory';
-
-function App() {
-  const [messages, setMessages] = useState([]);
-  const [currentEmotion, setCurrentEmotion] = useState("normal");
-  const [config, setConfig] = useState(null);
-  const [currentState, setCurrentState] = useState({});
-  const [currentThought, setCurrentThought] = useState("");
-  const [showThought, setShowThought] = useState(false);
-  const [logicalTime, setLogicalTime] = useState("");
-  const [isThinking, setIsThinking] = useState(false);
-  const [serviceStatus, setServiceStatus] = useState(null);
-  const [historyError, setHistoryError] = useState('');
-  const historyLoadingRef = useRef(false);
-  const [toastMessage, setToastMessage] = useState("");
-  const [showTimeline, setShowTimeline] = useState(false);
-  const [showArchive, setShowArchive] = useState(false);
-  const thoughtTimerRef = useRef(null);
-  const thoughtScrollRef = useRef(null);
-  const ws = useRef(null);
-  const listRef = useRef(null);
-  const [showLogs, setShowLogs] = useState(false);
-  const [isSidebarOpen, setIsSidebarOpen] = useState(false);
-  const [sidebarWidth, setSidebarWidth] = useState(390);
-  const [isResizing, setIsResizing] = useState(false);
-  const [hasMore, setHasMore] = useState(true);
-  const [activeTab, setActiveTab] = useState("chat");
-  const [autoPlay, setAutoPlay] = useState(() => {
-    const saved = localStorage.getItem('autoPlay');
-    return saved !== null ? JSON.parse(saved) : true;
+import ChatPanel from './components/ChatPanel';
+import Modal from './components/Modal';
+import useEmberSession from './useEmberSession';
+import { readPreference, writePreference, isSendKey } from './preferences';
+const connectionLabels = {
+  connecting: '正在连接',
+  online: '已连接',
+  reconnecting: '连接中断 · 正在重连'
+};
+const phaseLabels = {
+  sending: '正在发送…',
+  preparing: '正在准备场景与回复…',
+  generating: '正在回复…',
+  tools: '正在使用工具…',
+  stopping: '正在停止，请等待后台任务结束…',
+  finalizing: '正在完成本轮收尾…',
+  idle: '可以继续交谈'
+};
+const modes = {
+  face_to_face: '面对面',
+  remote: '远程交流',
+  unknown: '交流方式待确认'
+};
+export default function App() {
+  const [draft, setDraft] = useState(() => {
+    const saved = readPreference('ember.draft.v1', '');
+    return typeof saved === 'string' ? saved : '';
   });
-
+  const [autoPlay, setAutoPlay] = useState(() => readPreference('autoPlay', false) === true);
+  const [fontSize, setFontSize] = useState(() => Math.max(16, Math.min(24, Number(readPreference('ember.fontSize.v1', 18)) || 18)));
+  const [view, setView] = useState(() => readPreference('ember.view.v1', 'stage') === 'chat' ? 'chat' : 'stage');
+  const [panel, setPanel] = useState(null);
+  const [composing, setComposing] = useState(false);
+  const [queuedText, setQueuedText] = useState(null);
+  const queueVersion = useRef(0);
+  const input = useRef(null);
+  const session = useEmberSession(autoPlay);
+  const {
+    config,
+    playback
+  } = session;
+  const state = config?.state || {};
+  const scene = state.scene || {};
+  const name = config?.display_name || '依鸣';
+  const paused = config?.status?.paused || config?.status?.scene?.ready === false;
+  const sendDisabled = session.connection !== 'online' || session.busy || paused || !draft.trim();
   useEffect(() => {
-    localStorage.setItem('autoPlay', JSON.stringify(autoPlay));
+    writePreference('ember.draft.v1', draft);
+  }, [draft]);
+  useEffect(() => {
+    writePreference('autoPlay', autoPlay);
   }, [autoPlay]);
-
-  // 轮询 EventBus 逻辑时间
-  const timeTimerRef = useRef(null);
   useEffect(() => {
-    // 防止 React StrictMode 重复创建定时器
-    if (timeTimerRef.current) return;
-
-    const fetchTime = () => {
-      getJSON(`${API_BASE}/config`)
-        .then(data => {
-          if (data.logical_time) setLogicalTime(data.logical_time);
-          setIsThinking(data.is_thinking || false);
-          setServiceStatus(data.status || null);
-        })
-        .catch(() => { });
-    };
-    fetchTime(); // 立即执行一次
-    timeTimerRef.current = setInterval(fetchTime, 2000);
-    return () => {
-      clearInterval(timeTimerRef.current);
-      timeTimerRef.current = null;
-    };
-  }, []);
-
-  const getEmotionColor = () => {
-    return "#ffffff";
+    writePreference('ember.fontSize.v1', fontSize);
+  }, [fontSize]);
+  useEffect(() => {
+    writePreference('ember.view.v1', view);
+  }, [view]);
+  const edit = text => {
+    setDraft(text);
+    setPanel(null);
+    requestAnimationFrame(() => input.current?.focus());
   };
-
-  const radarData = [
-    { subject: 'P', value: currentState.P || 5, fullMark: 10 },
-    { subject: 'A', value: currentState.A || 5, fullMark: 10 },
-    { subject: 'D', value: currentState.D || 5, fullMark: 10 },
-  ];
-
-  // 当切换到对话标签页时，自动滚动到底部
-  useEffect(() => {
-    if (activeTab === 'chat') {
-      setTimeout(scrollToBottom, 50);
-    }
-  }, [activeTab]);
-
-  // 自动滚动想法窗口到底部
-  useEffect(() => {
-    if (thoughtScrollRef.current) {
-      thoughtScrollRef.current.scrollTop = thoughtScrollRef.current.scrollHeight;
-    }
-  }, [currentThought]);
-
-  // 处理侧边栏拖拽调大小
-  const startResizing = (e) => {
-    e.preventDefault();
-    setIsResizing(true);
+  const send = event => {
+    event?.preventDefault();
+    if (composing) return;
+    if (session.sendMessage(draft)) setDraft('');
   };
-
-  const stopResizing = () => {
-    setIsResizing(false);
-  };
-
-  const resize = (e) => {
-    if (isResizing) {
-      // 限制最小宽度和最大宽度（最大也别超过屏幕一半）
-      const newWidth = Math.max(280, Math.min(e.clientX - 10, window.innerWidth * 0.7));
-      setSidebarWidth(newWidth);
-    }
-  };
-
-  useEffect(() => {
-    if (isResizing) {
-      window.addEventListener('mousemove', resize);
-      window.addEventListener('mouseup', stopResizing);
-      // 禁止文字选中，提升拖拽体验
-      document.body.style.userSelect = 'none';
-      document.body.style.cursor = 'col-resize';
-    } else {
-      window.removeEventListener('mousemove', resize);
-      window.removeEventListener('mouseup', stopResizing);
-      document.body.style.userSelect = 'auto';
-      document.body.style.cursor = 'default';
-    }
-    return () => {
-      window.removeEventListener('mousemove', resize);
-      window.removeEventListener('mouseup', stopResizing);
-    };
-  }, [isResizing]);
-
-  const [isLoadingHistory, setIsLoadingHistory] = useState(false);
-  const [inputValue, setInputValue] = useState("");
-  const [isRecording, setIsRecording] = useState(false);
-  const mediaRecorder = useRef(null);
-  const audioChunks = useRef([]);
-  const [currentAudio, setCurrentAudio] = useState(null);
-  const audioQueue = useRef({}); // 改为对象以存储 index -> data
-  const nextPlayIndex = useRef(0);
-  const isPlaying = useRef(false);
-  const audioRef = useRef(null); // 使用 Ref 锁定音频对象
-
-  // 获取后端角色配置
-  useEffect(() => {
-    getJSON(`${API_BASE}/config`)
-      .then(data => {
-        if (data.error) {
-          console.error("加载配置失败:", data.error);
-        } else {
-          console.log("已加载角色配置:", data);
-          setConfig(data);
-          if (data.state) setCurrentState(data.state);
-        }
-      })
-      .catch(err => console.error("获取后端配置异常:", err));
-
-    // 初始获取历史记录
-    loadHistory();
-  }, []);
-
-  // 加载分页历史记录
-  const loadHistory = async (before = null, beforeId = null) => {
-    if (historyLoadingRef.current || (!hasMore && before)) return;
-    historyLoadingRef.current = true;
-
-    setIsLoadingHistory(true);
-    const url = `${API_BASE}/history?limit=20${before ? `&before=${before}` : ""}${beforeId ? `&before_id=${beforeId}` : ''}`;
+  const interruptAndSend = async () => {
+    if (!draft.trim() || composing || queuedText !== null) return;
+    const text = draft.trim();
+    const version = ++queueVersion.current;
+    setQueuedText(text);
     try {
-      const data = await getJSON(url);
-      if (!Array.isArray(data)) throw new Error('聊天记录接口返回格式无效');
-      setHistoryError('');
-      if (Array.isArray(data)) {
-        setHasMore(data.length === 20);
-
-        // 统一处理历史记录：数据库返回 DESC，我们需要将其反转为时间正序显示
-        const historyData = [...data].reverse();
-
-        if (before) {
-          // 向上加载更多，需要保持滚动位置
-          const originalHeight = listRef.current?.scrollHeight || 0;
-          setMessages(prev => mergeHistory(prev, historyData));
-
-          // 加载完成后恢复滚动位置（会在渲染后处理）
-          setTimeout(() => {
-            if (listRef.current) {
-              const newHeight = listRef.current.scrollHeight;
-              listRef.current.scrollTop = newHeight - originalHeight;
-            }
-          }, 0);
-        } else {
-          // 初始加载，滚到底部
-          setMessages(prev => mergeHistory(prev, historyData));
-          // 增加延迟和多次尝试，确保在内容完全渲染后滚动到底部
-          setTimeout(() => scrollToBottom(), 100);
-          setTimeout(() => scrollToBottom(), 300);
-          setTimeout(() => scrollToBottom(), 500);
-        }
+      await session.cancelTurn();
+      if (version === queueVersion.current && session.sendMessage(text)) {
+        setDraft(current => current.trim() === text ? '' : current);
       }
-    } catch (err) {
-      console.error("加载历史失败:", err);
-      setHistoryError(err.message || '聊天记录加载失败');
-    } finally {
-      setIsLoadingHistory(false);
-      historyLoadingRef.current = false;
-    }
+    } catch { /* The session displays a recoverable error; keep the draft. */ }
+    finally { if (version === queueVersion.current) setQueuedText(null); }
   };
-
-  // 监听滚动到顶部
-  useEffect(() => {
-    if (!historyError) return;
-    const timer = setInterval(() => loadHistory(), 5000);
-    return () => clearInterval(timer);
-  }, [historyError]);
-
-  const handleScroll = (e) => {
-    if (e.target.scrollTop === 0 && hasMore && !isLoadingHistory && !showLogs) {
-      // 找到目前最早的一条聊天记录的时间（非系统日志）
-      const chatMessages = messages.filter(m => m.role !== 'system');
-      if (chatMessages.length > 0) {
-        const oldestTimestamp = chatMessages[0].timestamp;
-        const oldest = chatMessages[0];
-        loadHistory(oldestTimestamp, oldest.history_id || (typeof oldest.id === 'number' ? oldest.id : null));
-      }
-    }
-  };
-
-  // 自动滚动到底部
-  const scrollToBottom = () => {
-    if (listRef.current) {
-      listRef.current.scrollTop = listRef.current.scrollHeight;
-    }
-  };
-
-  // 监听消息更新自动滚到底部（仅限新消息进入时）
-  useEffect(() => {
-    // 如果消息变长且不是在加载历史，则滚动到底
-    if (!isLoadingHistory && messages.length > 0) {
-      scrollToBottom();
-    }
-  }, [messages, isLoadingHistory]);
-
-  // 播放音频队列
-  const playNextAudio = () => {
-    if (isPlaying.current) return;
-
-    const audioObj = audioQueue.current[nextPlayIndex.current];
-    if (audioObj) {
-      isPlaying.current = true;
-      delete audioQueue.current[nextPlayIndex.current]; // 取出后删除
-
-      // 【音画同步】在播放开始前同步显示文本和表情
-      if (audioObj.text) {
-        const messageId = audioObj.id || Date.now();
-        setMessages(prev => {
-          const existingIndex = prev.findIndex(m => m.id === messageId && m.role === 'ai');
-          if (existingIndex !== -1) {
-            const newMessages = [...prev];
-            newMessages[existingIndex] = {
-              ...newMessages[existingIndex],
-              content: newMessages[existingIndex].content + audioObj.text + " ",
-              timestamp: Date.now() // 更新时间戳为最后一段话的时间
-            };
-            return newMessages;
-          } else {
-            return [...prev, { role: 'ai', content: audioObj.text + " ", id: messageId, timestamp: Date.now() }];
-          }
-        });
-      }
-
-      if (audioObj.live2d_emotion) {
-        // 直接使用小写的标签，匹配 LSS.model3.json 中的 Name 段
-        const emotion = audioObj.live2d_emotion.toLowerCase();
-        setCurrentEmotion(emotion);
-      }
-
-      const audio = new Audio(`data:audio/wav;base64,${audioObj.content}`);
-      setCurrentAudio(audio);
-
-      audio.onended = () => {
-        isPlaying.current = false;
-        setCurrentAudio(null);
-        nextPlayIndex.current += 1; // 播放下一号
-        playNextAudio();
-      };
-
-      audio.play().catch(err => {
-        console.error("播放音频失败:", err);
-        isPlaying.current = false;
-        nextPlayIndex.current += 1;
-        playNextAudio();
-      });
-    }
-  };
-
-  const requestTTS = (text) => {
-    if (ws.current && ws.current.readyState === WebSocket.OPEN) {
-      ws.current.send(JSON.stringify({
-        type: "tts_request",
-        content: text
-      }));
-    }
-  };
-
-  useEffect(() => {
-    // 延迟连接以避开 React Strict Mode 的重复初始化干扰
-    const connectWS = () => {
-      console.log("正在尝试建立 WebSocket 连接...");
-      ws.current = new WebSocket(WS_URL);
-
-      ws.current.onopen = () => {
-        console.log("WebSocket 连接已打开");
-        loadHistory();
-        setMessages(prev => [...prev.filter(m => m.id !== 'ws-status'), { role: "system", content: "WebSocket 连接已建立", id: 'ws-status' }]);
-      };
-
-      ws.current.onmessage = (event) => {
-        try {
-          const data = JSON.parse(event.data);
-          if (data.type === 'ping') {
-            ws.current?.send(JSON.stringify({ type: 'pong' }));
-            return;
-          }
-          if (data.type === 'error') {
-            setToastMessage(data.content);
-            return;
-          }
-          console.log("收到 WebSocket 数据对象:", data);
-
-          if (data.type === 'message') {
-            // ... (保持不变)
-            const messageId = data.message_id || data.id || Date.now();
-            setMessages(prev => {
-              const mappedRole = (data.sender === 'ai' || data.sender === 'assistant' || data.sender === 'bot') ? 'ai' : 'user';
-              const existingIndex = prev.findIndex(m => (m.message_id || m.id) === messageId && m.role === mappedRole);
-
-              let updatedFullContent = "";
-              if (existingIndex !== -1) {
-                const oldFullContent = prev[existingIndex].rawContent || prev[existingIndex].content;
-                updatedFullContent = data.mode === 'append' ? oldFullContent + data.content : data.content;
-              } else {
-                updatedFullContent = data.content;
-              }
-
-              // 解析 thought 部分
-              let displayContent = updatedFullContent;
-              let extractedThought = "";
-
-              // 查找第一个 <thought> 到其后的第 一个 </thought> 之间的内容
-              const thoughtStartTag = "<thought>";
-              const thoughtEndTag = "</thought>";
-              const firstThoughtStart = updatedFullContent.indexOf(thoughtStartTag);
-              const firstThoughtEnd = updatedFullContent.indexOf(thoughtEndTag, firstThoughtStart);
-
-              if (firstThoughtStart !== -1) {
-                if (firstThoughtEnd !== -1) {
-                  extractedThought = updatedFullContent.slice(firstThoughtStart + thoughtStartTag.length, firstThoughtEnd).trim();
-                } else {
-                  // 如果还没收录完第一个 </thought>，则显示目前收到的所有 thought 内容
-                  extractedThought = updatedFullContent.slice(firstThoughtStart + thoughtStartTag.length).trim();
-                }
-                setCurrentThought(extractedThought);
-                setShowThought(true);
-                if (thoughtTimerRef.current) clearTimeout(thoughtTimerRef.current);
-              }
-
-              // 查找最后一个 </thought>
-              const lastThoughtEnd = updatedFullContent.lastIndexOf(thoughtEndTag);
-              if (lastThoughtEnd !== -1) {
-                displayContent = updatedFullContent.slice(lastThoughtEnd + thoughtEndTag.length).trim();
-              } else if (updatedFullContent.includes(thoughtStartTag)) {
-                // 如果还在 thought 中，对话框显示为空
-                displayContent = "";
-              }
-
-              // 剥除 LLM 自行添加的 <response> 标签（保留内容）
-              displayContent = displayContent.replace(/<\/?response>/g, "").trim();
-
-              if (existingIndex !== -1) {
-                const newMessages = [...prev];
-                newMessages[existingIndex] = {
-                  ...newMessages[existingIndex],
-                  content: displayContent,
-                  rawContent: updatedFullContent,
-                  timestamp: data.timestamp || newMessages[existingIndex].timestamp
-                };
-                return newMessages;
-              } else {
-                return [...prev, {
-                  role: mappedRole,
-                  message_id: data.message_id,
-                  content: displayContent,
-                  rawContent: updatedFullContent,
-                  id: messageId,
-                  timestamp: data.timestamp || Date.now()
-                }];
-              }
-            });
-
-            if (data.live2d_emotion) {
-              const emotion = data.live2d_emotion.toLowerCase();
-              setCurrentEmotion(emotion);
-            }
-          }
-          else if (data.type === 'llm.done') {
-            console.log("收到 llm.done, 准备倒计时隐藏想法窗");
-            if (thoughtTimerRef.current) clearTimeout(thoughtTimerRef.current);
-            thoughtTimerRef.current = setTimeout(() => {
-              setShowThought(false);
-              setTimeout(() => {
-                setCurrentThought("");
-              }, 1500);
-            }, 4000);
-          }
-          else if (data.type === 'voice') {
-            audioQueue.current[data.index] = data;
-            playNextAudio();
-          }
-          else if (data.type === 'audio') {
-            console.log("收到 Base64 语音数据");
-            const audioData = `data:audio/mp3;base64,${data.audio_base64}`;
-            const audio = new Audio(audioData);
-            audio.volume = 1.0;
-
-            // 只有开启自动播放或者是手动触发时才播放
-            // 注意：手动触发也会收到广播，所以我们需要一种方式区分。
-            // 简单处理：如果是自动播放模式，或者用户刚才点击了手动播放（当前 currentAudio 为空时）
-            if (autoPlay || !isPlaying.current) {
-              audio.play()
-                .then(() => console.log("音频播放成功"))
-                .catch(err => console.error("播放被拦截:", err));
-            }
-
-            setCurrentAudio(audio);
-            audio.onended = () => setCurrentAudio(null);
-          }
-          else if (data.type === 'state_update') {
-            setCurrentState(data.state);
-          }
-        } catch (err) {
-          console.error("解析 WebSocket 消息失败:", err, event.data);
-        }
-      };
-
-      ws.current.onclose = (e) => {
-        console.log("WebSocket 连接已关闭", e.reason);
-        setMessages(prev => [...prev.filter(m => m.id !== 'ws-status'), { role: "system", content: "WebSocket 连接断开，尝试重连中...", id: 'ws-status' }]);
-        // 5秒后尝试重连
-        setTimeout(connectWS, 5000);
-      };
-
-      ws.current.onerror = (err) => {
-        console.error("WebSocket 错误:", err);
-      };
-    };
-
-    connectWS();
-
-    return () => {
-      if (ws.current) {
-        // 关闭时清除重连相关的副作用
-        ws.current.onclose = null;
-        ws.current.close();
-      }
-    };
-  }, []);
-
-  const formatTime = (ts) => {
-    if (!ts) return "";
-    const date = new Date(Number(ts));
-    return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
-  };
-
-  const formatDateLabel = (ts) => {
-    if (!ts) return "";
-    const date = new Date(Number(ts));
-    const now = new Date();
-
-    // 如果是今年且是同一天
-    if (date.toDateString() === now.toDateString()) {
-      return "今天";
-    }
-
-    // 昨天
-    const yesterday = new Date();
-    yesterday.setDate(now.getDate() - 1);
-    if (date.toDateString() === yesterday.toDateString()) {
-      return "昨天";
-    }
-
-    // 跨年显示年份，否则只显示月日
-    const options = date.getFullYear() === now.getFullYear()
-      ? { month: 'long', day: 'numeric' }
-      : { year: 'numeric', month: 'long', day: 'numeric' };
-
-    return date.toLocaleDateString('zh-CN', options);
-  };
-
-  const handleSend = async () => {
-    // 立即请求最新状态，判断是否正在思考
-    try {
-      const configData = await getJSON(`${API_BASE}/config`);
-      if (configData.is_thinking) {
-        setToastMessage("依鸣正在思考中，请稍候...");
-        setTimeout(() => setToastMessage(""), 2000);
-        return;
-      }
-    } catch (e) {
-      // 网络错误时降级使用本地状态
-      if (isThinking) {
-        setToastMessage("依鸣正在思考中，请稍候...");
-        setTimeout(() => setToastMessage(""), 2000);
-        return;
-      }
-    }
-
-    if (currentAudio) {
-      currentAudio.pause();
-      setCurrentAudio(null);
-    }
-    audioQueue.current = {};
-    nextPlayIndex.current = 0;
-    isPlaying.current = false;
-
-    // 清除旧的想法气泡，为新对话腾出空间
-    if (thoughtTimerRef.current) clearTimeout(thoughtTimerRef.current);
-    setShowThought(false);
-    setTimeout(() => setCurrentThought(""), 1000); // 在淡出动画后彻底清空内容
-
-    if (!inputValue.trim()) return;
-    if (ws.current && ws.current.readyState === WebSocket.OPEN) {
-      const messageId = Date.now();
-      // 不再在前端本地直接 setMessages，而是通过 WebSocket 发送
-      // 后端会通过广播发回带有 logic_now 时间戳的消息，前端再渲染
-      ws.current.send(JSON.stringify({
-        sender: "user",
-        format: "text",
-        content: inputValue,
-        id: messageId
-      }));
-      setInputValue("");
-    }
-  };
-
-  const startRecording = async () => {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-
-      mediaRecorder.current = new MediaRecorder(stream);
-      audioChunks.current = [];
-
-      mediaRecorder.current.ondataavailable = (event) => {
-        if (event.data.size > 0) {
-          audioChunks.current.push(event.data);
-        }
-      };
-      mediaRecorder.current.onstop = () => {
-        const audioBlob = new Blob(audioChunks.current, { type: 'audio/wav' });
-        const reader = new FileReader();
-        reader.readAsDataURL(audioBlob);
-        reader.onloadend = () => {
-          const base64String = reader.result.split(',')[1];
-          if (ws.current && ws.current.readyState === WebSocket.OPEN) {
-            ws.current.send(JSON.stringify({
-              sender: "user",
-              type: "voice",
-              format: "audio",
-              content: base64String,
-              time: new Date().toISOString()
-            }));
-            setMessages(prev => [...prev, { role: "system", content: "[语音消息已发送]" }]);
-          }
-        };
-      };
-
-      mediaRecorder.current.start();
-      if (currentAudio) {
-        currentAudio.pause();
-        setCurrentAudio(null);
-      }
-      audioQueue.current = {};
-      nextPlayIndex.current = 0;
-      isPlaying.current = false;
-      setIsRecording(true);
-    }
-    catch (err) {
-      console.error("获取麦克风失败:", err);
-    }
-  };
-
-  const stopRecording = () => {
-    if (mediaRecorder.current && isRecording) {
-      mediaRecorder.current.stop();
-      setIsRecording(false);
-    }
-  };
-
-  const handleKeyPress = (e) => {
-    if (e.key === 'Enter') handleSend();
-  };
-
-  const handleLive2DTouch = (part) => {
-    if (ws.current && ws.current.readyState === WebSocket.OPEN) {
-      const messageId = Date.now();
-      const actionText = part === 'head' ? "*(用户摸了摸你的头)*" : "*(用户触碰了你的身体)*";
-      ws.current.send(JSON.stringify({
-        sender: "user",
-        format: "text",
-        content: actionText,
-        id: messageId
-      }));
-    }
-  };
-
-  const visibleMessages = messages.filter(msg => showLogs ? msg.role === 'system'
-    : msg.role !== 'system' && (msg.role !== 'ai' || Boolean(msg.content)));
-
-  return (
-    <div className={`app-container ${isSidebarOpen ? 'sidebar-open' : ''}`}>
-      {/* Toast 提示 */}
-      {toastMessage && (
-        <div className="toast-message">
-          {toastMessage}
-        </div>
-      )}
-      <Live2DViewer
-        currentEmotion={currentEmotion}
-        audio={currentAudio}
-        modelPath={config?.live2d?.model_path}
-        onTouch={handleLive2DTouch}
-      />
-
-      {/* 存档按钮 - 右下角 */}
-      <button
-        className="archive-trigger-btn"
-        onClick={() => setShowArchive(true)}
-        title="存档管理"
-      >
-        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
-          <path d="M20 6h-8l-2-2H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2zm0 12H4V8h16v10z" />
-        </svg>
-      </button>
-
-      {/* 存档弹窗 */}
-      <ArchiveModal
-        isOpen={showArchive}
-        onClose={() => setShowArchive(false)}
-      />
-
-      {/* 状态面板 - 放置在右上方 */}
-      <div className="status-overlay">
-        <div className="status-header">
-          <div className="logic-clock-mini">当前时间: {logicalTime || "SYNCING..."}</div>
-          {serviceStatus && (!serviceStatus.database?.ready || !serviceStatus.long_term_memory?.ready
-            || serviceStatus.scene?.state === 'needs_confirmation') && (
-            <div role="status" style={{ color: '#ffcf80', fontSize: 12 }}>
-              {!serviceStatus.database?.ready && '聊天记录保存异常；'}
-              {!serviceStatus.long_term_memory?.ready && '长期记忆不可用；'}
-              {serviceStatus.scene?.state === 'needs_confirmation' && '当前场景待确认'}
-            </div>
-          )}
-        </div>
-        <div className="status-radar">
-          <ResponsiveContainer width="100%" height="100%">
-            <RadarChart cx="50%" cy="50%" outerRadius="85%" data={radarData}>
-              <PolarGrid stroke="rgba(255,255,255,0.15)" />
-              <PolarAngleAxis dataKey="subject" tick={{ fill: 'rgba(255,255,255,0.7)', fontSize: 12, fontWeight: 'bold' }} />
-              <Radar
-                name="State"
-                dataKey="value"
-                stroke={getEmotionColor()}
-                fill={getEmotionColor()}
-                fillOpacity={0.45}
-              />
-            </RadarChart>
-          </ResponsiveContainer>
-        </div>
-        <div className="status-content">
-          <div className="status-scroll-box">
-            <div className="status-text-item">
-              <span className="label">客观情境</span>
-              <p>{currentState["客观情境"] || "未知"}</p>
-            </div>
-            <div className="status-text-item">
-              <span className="label">内心活动</span>
-              <p className="inner-monologue">“{currentState["内心活动"] || "平静"}”</p>
-            </div>
-            <div className="status-text-item">
-              <span className="label">近期目标</span>
-              <p>{currentState["近期目标"] || "无"}</p>
-            </div>
-          </div>
-          <div className="status-actions">
-            <button className="action-btn timeline-trigger" onClick={() => setShowTimeline(true)}>
-              <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
-                <path d="M13 3c-4.97 0-9 4.03-9 9H1l3.89 3.89.07.14L9 12H6c0-3.87 3.13-7 7-7s7 3.13 7 7-3.13 7-7 7c-1.93 0-3.68-.79-4.94-2.06l-1.42 1.42C8.27 19.99 10.51 21 13 21c4.97 0 9-4.03 9-9s-4.03-9-9-9zm-1 5v5l4.28 2.54.72-1.18-3.5-2.08V8H12z" />
-              </svg>
-              近期轨迹
-            </button>
-          </div>
-        </div>
+  return <div className={`ember-app view-${view}`}>
+  <header className="app-header">
+    <a className="brand" href="#main" aria-label="Ember，回到陪伴">
+      Ember
+      <span>与你，此刻</span>
+    </a>
+    <nav aria-label="主要功能">
+      <button aria-pressed={!panel} onClick={() => setPanel(null)}>陪伴</button>
+      <button aria-pressed={panel === 'memories'} onClick={() => setPanel('memories')}>回忆</button>
+      <button aria-pressed={panel === 'archive'} onClick={() => setPanel('archive')}>存档</button>
+      <button aria-pressed={panel === 'settings'} onClick={() => setPanel('settings')}>设置</button>
+    </nav>
+    <span className={`connection connection-${session.connection}`} role="status">{connectionLabels[session.connection]}</span>
+  </header>
+  <div className="world-bar">
+    <div className="world-facts">
+      <time>{config?.logical_time || '正在同步世界时间'}</time>
+      <span>{scene.character_location || '角色位置待确认'}</span>
+      <span>{modes[scene.communication_mode] || modes.unknown}</span>
+    </div>
+    <div className="view-switch" role="group" aria-label="界面视图">
+      <button aria-pressed={view === 'stage'} onClick={() => setView('stage')}>舞台优先</button>
+      <button aria-pressed={view === 'chat'} onClick={() => setView('chat')}>对话优先</button>
+    </div>
+  </div>
+  {(session.configError || config?.status?.database?.ready === false || config?.status?.long_term_memory?.ready === false || config?.status?.scene?.state === 'needs_confirmation') && <div className="service-notice" role="status">{session.configError}{config?.status?.database?.ready === false && ' 聊天保存服务异常，消息可能仍在等待保存。'}{config?.status?.long_term_memory?.ready === false && ' 长期记忆暂不可用。'}{config?.status?.scene?.state === 'needs_confirmation' && ' 当前活动待确认，可以在对话中说明。'}</div>}
+  <main id="main" className="companion-layout">
+    <section className="character-stage" aria-label={`${name}的舞台`}>
+      <div className="stage-caption">
+        <span className="eyebrow">WITH YOU</span>
+        <h1>{name}</h1>
+        <p>{scene.communication_mode === 'remote' ? '隔着屏幕，也可以好好聊聊。' : '留一点时间，给眼前的相处。'}</p>
       </div>
-
-      {/* 轨迹时间轴模态框 */}
-      {showTimeline && (
-        <div className="timeline-modal-overlay" onClick={() => setShowTimeline(false)}>
-          <div className="timeline-modal" onClick={e => e.stopPropagation()}>
-            <div className="modal-header">
-              <h3>近期综合轨迹</h3>
-              <button className="action-btn" onClick={() => setShowTimeline(false)}>
-                <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
-                  <path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z" />
-                </svg>
-
-              </button>
-            </div>
-            <div className="timeline-container">
-              {(currentState["近期综合轨迹"] || "").split("->").map((item, idx) => (
-                <div key={idx} className="timeline-item">
-                  <div className="timeline-dot-wrapper">
-                    <div className="timeline-dot"></div>
-                    {idx < (currentState["近期综合轨迹"] || "").split("->").length - 1 && <div className="timeline-line"></div>}
-                  </div>
-                  <div className="timeline-text">{item.trim()}</div>
-                </div>
-              ))}
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* 想法窗口 - 悬停在 Live2D 模型上方，支持淡入淡出 */}
-      {currentThought && (
-        <div className={`floating-thought ${showThought ? 'fade-in' : 'fade-out'}`}>
-          <div className="thought-tag">思考过程</div>
-          <div className="thought-text" ref={thoughtScrollRef}>{currentThought}</div>
-        </div>
-      )}
-
-      <div
-        className={`sidebar ${isSidebarOpen ? 'open' : ''} ${isResizing ? 'resizing' : ''}`}
-        style={{ width: isSidebarOpen ? `${sidebarWidth}px` : '0' }}
-      >
-        <div className="sidebar-header">
-          <div className="sidebar-title">对话回复</div>
-          <button
-            className="icon-btn"
-            onClick={() => setShowLogs(!showLogs)}
-            title={showLogs ? "返回对话" : "查看日志"}
-          >
-            <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
-              <path d="M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z" />
-            </svg>
-          </button>
-        </div>
-        <div className="message-list" ref={listRef} onScroll={handleScroll}>
-          <>
-            {historyError && (
-              <div role="alert" style={{ color: '#ffcf80', padding: 12 }}>
-                {historyError} <button onClick={() => loadHistory()}>重新加载</button>
-              </div>
-            )}
-            {isLoadingHistory && (
-              <div className="loading-history">加载历史记录中...</div>
-            )}
-            {!hasMore && !showLogs && messages.length > 10 && (
-              <div className="no-more">—— 没有更多记录了 ——</div>
-            )}
-            {visibleMessages
-              .map((msg, index, array) => {
-                const isFirstInGroup = index === 0 || array[index - 1].role !== msg.role;
-
-                // 检查是否日期发生了跨变
-                const showDateSeparator = index === 0 ||
-                  new Date(Number(array[index - 1].timestamp)).toDateString() !== new Date(Number(msg.timestamp)).toDateString();
-
-                return (
-                  <React.Fragment key={msg.id ? messageKey(msg) : index}>
-                    {showDateSeparator && !showLogs && msg.timestamp && (
-                      <div className="date-separator">
-                        <span>{formatDateLabel(msg.timestamp)}</span>
-                      </div>
-                    )}
-                    <div className={`message-row ${msg.role} ${isFirstInGroup ? 'first-in-group' : 'consecutive'}`}>
-                      {msg.role === 'ai' && !showLogs && (
-                        <div className="avatar ai">
-                          {isFirstInGroup ? (config?.display_name ? config.display_name[0] : 'A') : ''}
-                        </div>
-                      )}
-                      <div className="message-wrapper">
-                        {isFirstInGroup && !showLogs && msg.timestamp && (
-                          <div className="message-time-top">{formatTime(msg.timestamp)}</div>
-                        )}
-                        <div
-                          className={`message-item ${msg.role}`}
-                          style={showLogs ? { fontSize: '12px', color: '#666', fontFamily: 'monospace' } : {}}
-                        >
-                          <div className="message-content">{msg.content}</div>
-                          {msg.role === 'ai' && !showLogs && msg.content && (
-                            <button
-                              type="button"
-                              className="play-voice-btn"
-                              onClick={(e) => {
-                                e.preventDefault();
-                                e.stopPropagation();
-                                requestTTS(msg.content);
-                              }}
-                              title="播放语音"
-                            >
-                              <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor">
-                                <path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z" />
-                              </svg>
-                            </button>
-                          )}
-                        </div>
-                      </div>
-                      {msg.role === 'user' && !showLogs && (
-                        <div className="avatar user">
-                          {isFirstInGroup ? 'U' : ''}
-                        </div>
-                      )}
-                    </div>
-                  </React.Fragment>
-                );
-              })}
-            {visibleMessages.length === 0 && (
-              <div style={{ textAlign: 'center', color: '#999', marginTop: '20px', fontSize: '12px' }}>
-                {showLogs ? "暂无系统日志" : "暂无对话记录"}
-              </div>
-            )}
-          </>
-        </div>
-        {isSidebarOpen && (
-          <div className="resize-handle" onMouseDown={startResizing} />
-        )}
+      <div className="stage-atmosphere" aria-hidden="true" />
+      <Live2DViewer currentEmotion={session.emotion} audio={playback.audio} modelPath={config?.live2d?.model_path} />
+      <div className="stage-footer">
+        <button onClick={() => setPanel('scene')}>查看当前情境</button>
+        <span>{scene.user_location ? `你在：${scene.user_location}` : '你的位置尚未确认'}</span>
       </div>
-      <div className="main-area">
-        <div className="input-area">
-          <button
-            className={`toggle-sidebar-btn ${isSidebarOpen ? 'active' : ''}`}
-            onClick={() => setIsSidebarOpen(!isSidebarOpen)}
-            title={isSidebarOpen ? "关闭历史" : "打开历史"}
-          >
-            <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
-              <path d="M13 3c-4.97 0-9 4.03-9 9H1l3.89 3.89.07.14L9 12H6c0-3.87 3.13-7 7-7s7 3.13 7 7-3.13 7-7 7c-1.93 0-3.68-.79-4.94-2.06l-1.42 1.42C8.27 19.99 10.51 21 13 21c4.97 0 9-4.03 9-9s-4.03-9-9-9zm-1 5v5l4.28 2.54.72-1.18-3.5-2.08V8H12z" />
-            </svg>
-            <span className="btn-label">{isSidebarOpen ? "收起" : "历史"}</span>
-          </button>
-          <input
-            type="text"
-            placeholder={config ? `和${config.display_name}聊会儿吧...` : "和我说点什么吧..."}
-            value={inputValue}
-            onChange={(e) => setInputValue(e.target.value)}
-            onKeyDown={handleKeyPress}
-          />
-          <button
-            className={`action-btn mic-btn ${isRecording ? 'active recording' : ''}`}
-            onClick={isRecording ? stopRecording : startRecording}
-            title={isRecording ? "停止录音" : "点击开始说话"}
-            disabled={true}
-            style={{ opacity: 0.5, cursor: 'not-allowed' }}
-          >
-            <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
-              <path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3z" />
-              <path d="M17 11c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z" />
-            </svg>
-            <span className="btn-label">禁用</span>
-          </button>
-          <button
-            className={`action-btn autoplay-toggle ${autoPlay ? 'active' : ''}`}
-            onClick={() => setAutoPlay(!autoPlay)}
-            title={autoPlay ? "关闭自动播放" : "开启自动播放"}
-          >
-            <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
-              {autoPlay ? (
-                <path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z" />
-              ) : (
-                <path d="M16.5 12c0-1.77-1.02-3.29-2.5-4.03v2.21l2.45 2.45c.03-.2.05-.41.05-.63zm2.5 0c0 .94-.2 1.82-.54 2.64l1.51 1.51C20.63 14.91 21 13.5 21 12c0-4.28-2.99-7.86-7-8.77v2.06c2.89.86 5 3.54 5 6.71zM4.27 3L3 4.27 7.73 9H3v6h4l5 5v-6.73l4.25 4.25c-.67.52-1.42.93-2.25 1.18v2.06c1.38-.31 2.63-.95 3.69-1.81L19.73 21 21 19.73l-9-9L4.27 3zM12 4L9.91 6.09 12 8.18V4z" />
-              )}
-            </svg>
-            <span className="btn-label">{autoPlay ? "语音开" : "语音关"}</span>
-          </button>
-          <button className="action-btn send-btn primary" onClick={handleSend} title={"单击或enter发送消息"}>
-            <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
-              <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z" />
-            </svg>
-            <span className="btn-label">发送</span>
-          </button>
+    </section>
+    <div className="dialogue-workspace">
+      <ChatPanel session={session} onEdit={edit} fontSize={fontSize} />
+      <div className="session-feedback" role="status" aria-live="polite">
+        <span className={session.busy ? 'working-label' : ''}>{paused ? '场景正在准备或存读档，请稍候' : session.busy ? session.phase === 'idle' ? '正在处理本轮对话…' : phaseLabels[session.phase] : phaseLabels.idle}</span>
+        {session.busy && <small>可以编辑下一条草稿</small>}
+      </div>
+      {session.busy && config?.capabilities?.cancel_turn && ['running', 'stopping'].includes(session.activeTurn?.status) && <div className="turn-controls">
+        <button onClick={() => session.cancelTurn().catch(() => {})} disabled={session.phase === 'stopping' || session.connection !== 'online'}>
+          {session.phase === 'stopping' ? '正在停止…' : '停止生成'}</button>
+        <button onClick={interruptAndSend} disabled={!draft.trim() || composing || queuedText !== null || session.connection !== 'online'}>
+          {session.phase === 'stopping' ? '停止后发送草稿' : '打断并发送'}</button>
+      </div>}
+      {queuedText !== null && <div className="queued-draft" role="status"><span>停止后发送：{queuedText}</span>
+        <button onClick={() => { queueVersion.current += 1; setQueuedText(null); }}>取消待发</button></div>}
+      {session.notice && <div className="inline-notice" role="status">
+        <span>{session.notice}</span>
+        <button aria-label="关闭提示" onClick={() => session.setNotice('')}>关闭</button>
+      </div>}
+      {playback.error && <p className="audio-error" role="status">{playback.error}</p>}
+      <form className="composer" onSubmit={send}>
+        <label htmlFor="message-input" className="sr-only">对{name}说</label>
+        <textarea id="message-input" ref={input} value={draft} rows={3} placeholder={`对${name}说……`} onChange={event => setDraft(event.target.value)} onCompositionStart={() => setComposing(true)} onCompositionEnd={() => setComposing(false)} onKeyDown={event => {
+            if (!composing && isSendKey(event)) send(event);
+          }} />
+        <div className="composer-toolbar">
+          <div className="audio-controls">
+            <button type="button" aria-pressed={autoPlay} onClick={() => setAutoPlay(value => !value)}>{autoPlay ? '自动声音：开' : '自动声音：关'}</button>
+            {playback.state !== 'idle' && <button type="button" onClick={session.stopAudio}>{playback.state === 'loading' ? '取消等待声音' : '停止声音'}</button>}
+          </div>
+          <span className="keyboard-hint">Enter 发送 · Shift+Enter 换行</span>
+          <button className="primary-button" type="submit" disabled={sendDisabled}>{session.busy ? '等待本轮完成' : '发送'}</button>
         </div>
+      </form>
+      <div className="suggested-actions" aria-label="对话建议">
+        <button onClick={() => edit('最近在忙什么？')}>问问近况</button>
+        <button onClick={() => edit('要不要一起自习一会儿？')}>邀请自习</button>
+        <span>点击填入草稿，由你决定发送</span>
       </div>
     </div>
-  )
+  </main>
+  {panel === 'settings' && <Modal title="设置" onClose={() => setPanel(null)}>
+    <section className="settings-section">
+      <h3>声音与文字</h3>
+      <label className="setting-row">
+        <span>自动播放回复声音</span>
+        <input type="checkbox" checked={autoPlay} onChange={event => setAutoPlay(event.target.checked)} />
+      </label>
+      <p className="muted">关闭会停止当前声音并清空待播队列。每条回复仍可手动重播。</p>
+      <label className="setting-row" htmlFor="font-size">
+        <span>对白字号</span>
+        <output>{fontSize}px</output>
+      </label>
+      <input id="font-size" type="range" min="16" max="24" value={fontSize} onChange={event => setFontSize(Number(event.target.value))} />
+    </section>
+    <section className="settings-section">
+      <h3>显示</h3>
+      <p>切换舞台与对话视图只改变布局，不改变世界时间或双方位置。</p>
+      <p>草稿和显示偏好保存在当前浏览器。</p>
+    </section>
+    <section className="settings-section">
+      <h3>服务状态</h3>
+      <dl className="fact-list">
+        <dt>聊天数据库</dt>
+        <dd>{config?.status?.database?.ready ? '就绪' : '未就绪'}</dd>
+        <dt>长期记忆</dt>
+        <dd>{config?.status?.long_term_memory?.ready ? '就绪' : '未就绪'}</dd>
+        <dt>场景</dt>
+        <dd>{config?.status?.scene?.ready ? '就绪' : '准备中'}</dd>
+      </dl>
+      {config?.status?.configuration_warnings?.map(warning => <p className="inline-error" key={warning}>{warning}</p>)}
+      <button onClick={() => setPanel('observer')}>打开观察面板</button>
+    </section>
+  </Modal>}
+  {panel === 'scene' && <Modal title="当前情境" onClose={() => setPanel(null)}>
+    <dl className="fact-list">
+      <dt>角色位置</dt>
+      <dd>{scene.character_location || '未知'}</dd>
+      <dt>你的位置</dt>
+      <dd>{scene.user_location || '未知'}</dd>
+      <dt>交流方式</dt>
+      <dd>{modes[scene.communication_mode] || modes.unknown}</dd>
+      <dt>远程联系方式</dt>
+      <dd>{scene.remote_contact_confirmed ? '已确认' : '尚未确认'}</dd>
+    </dl>
+    <p className="scene-description">{state['客观情境'] || '场景尚在同步。'}</p>
+    <p className="muted">如有变化，请在对话中说明你的移动或交流方式。</p>
+    <button onClick={() => edit('我想确认一下我们现在的位置和交流方式。')}>在对话中确认</button>
+  </Modal>}
+  {panel === 'memories' && <Modal title="回忆" onClose={() => setPanel(null)}>
+    <h3>近期轨迹</h3>
+    <p className="muted">来自当前角色状态；可能包含离线推演，不能替代原始对话记录。</p>
+    <ol className="memory-trail">{(state['近期综合轨迹'] || '还没有可展示的轨迹').split(/->|→/).map((item, index) => <li key={index}>{item.trim()}</li>)}</ol>
+    <button onClick={() => {
+        setPanel(null);
+        session.loadHistory();
+      }}>回到对话记录</button>
+  </Modal>}
+  {panel === 'observer' && <Modal title="观察面板" onClose={() => setPanel(null)}>
+    <p className="muted">角色内部状态与生成独白，供调试和观察。</p>
+    <dl className="fact-list">{['P', 'A', 'D'].map(key => <div className="fact-pair" key={key}>
+        <dt>{key}</dt>
+        <dd>{state[key] ?? '未知'}</dd>
+      </div>)}</dl>
+    <h3>内心活动</h3>
+    <p className="preserve-text">{state['内心活动'] || '暂无'}</p>
+    <h3>近期目标</h3>
+    <p>{state['近期目标'] || '暂无'}</p>
+    <h3>本轮角色独白</h3>
+    <p className="preserve-text">{session.thought || '本轮暂无可展示的独白'}</p>
+  </Modal>}
+  <ArchiveModal isOpen={panel === 'archive'} onClose={() => setPanel(null)} />
+  </div>;
 }
-
-export default App

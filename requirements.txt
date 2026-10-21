@@ -8,7 +8,7 @@ psycopg2-binary>=2.9.9
 numpy>=1.26.0
 pgvector>=0.2.5
 json_repair>=0.28.0
-edge-tts>=7.2.7
+edge-tts>=7.3.1,<8
 neo4j==5.20.0
 
 # 测试依赖
